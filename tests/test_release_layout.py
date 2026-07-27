@@ -3,11 +3,13 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKER_PATH = ROOT / "scripts" / "check_release.py"
@@ -32,6 +34,115 @@ class ReleaseLayoutTests(unittest.TestCase):
         scanned = {path.relative_to(ROOT).as_posix() for path in CHECKER.release_files()}
         self.assertIn("scripts/check_release.py", scanned)
         self.assertIn("examples/AGENTS.md.example", scanned)
+
+    def test_release_files_follow_the_git_release_candidate_set(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ignored = root / ".venv" / "ignored.txt"
+            tracked = root / ".venv" / "tracked.txt"
+            ignored.parent.mkdir()
+            ignored.write_text("local-only", encoding="utf-8")
+            tracked.write_text("release-candidate", encoding="utf-8")
+            (root / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "init", "--quiet", str(root)],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "add", ".gitignore"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "add", "-f", ".venv/tracked.txt"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            scanned = {path.relative_to(root).as_posix() for path in CHECKER.release_files(root)}
+
+            self.assertIn(".venv/tracked.txt", scanned)
+            self.assertNotIn(".venv/ignored.txt", scanned)
+
+    def test_release_entries_ignore_an_enclosing_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = parent / "release"
+            root.mkdir()
+            expected = root / "packaged.txt"
+            expected.write_text("release content", encoding="utf-8")
+            (parent / ".gitignore").write_text("release/\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "init", "--quiet", str(parent)],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            scanned = {path.relative_to(root).as_posix() for path in CHECKER.release_entries(root)}
+
+            self.assertEqual({"packaged.txt"}, scanned)
+
+    def test_release_checker_scans_staged_content_when_worktree_differs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for source in CHECKER.release_files(ROOT):
+                destination = root / source.relative_to(ROOT)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+            subprocess.run(
+                ["git", "init", "--quiet", str(root)],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "add", "."],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            staged_secret = root / "staged-secret.txt"
+            staged_secret.write_text(
+                "token=" + "abcdefghijklmnop" + "qrstuvwxyz123456",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "add", "staged-secret.txt"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            staged_secret.write_text("clean worktree", encoding="utf-8")
+
+            completed = subprocess.run(
+                [sys.executable, str(root / "scripts" / "check_release.py")],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(1, completed.returncode, completed.stdout + completed.stderr)
+            self.assertIn("credential-like literal", completed.stderr)
+            self.assertIn("staged-secret.txt", completed.stderr)
+
+    def test_git_index_inspection_fails_closed_when_metadata_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".git").mkdir()
+
+            with mock.patch.object(
+                CHECKER.subprocess,
+                "run",
+                side_effect=FileNotFoundError("git unavailable"),
+            ):
+                with self.assertRaisesRegex(ValueError, "Git index could not be inspected"):
+                    list(CHECKER._git_index_entries(root))
 
     @unittest.skipIf(os.name == "nt", "private marker ACL verification requires POSIX")
     def test_external_private_markers_are_detected_without_value_echo(self) -> None:
@@ -63,9 +174,7 @@ class ReleaseLayoutTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        marketplace = json.loads(
-            (ROOT / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8")
-        )
+        marketplace = json.loads((ROOT / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8"))
         self.assertRegex(manifest["version"], r"^\d+\.\d+\.\d+$")
         self.assertEqual(manifest["name"], marketplace["plugins"][0]["name"])
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -88,13 +197,7 @@ class ReleaseLayoutTests(unittest.TestCase):
 
     def test_every_command_hook_has_a_windows_override(self) -> None:
         hooks = json.loads(
-            (
-                ROOT
-                / "plugins"
-                / "codex-control-plane-hooks"
-                / "hooks"
-                / "hooks.json"
-            ).read_text(encoding="utf-8")
+            (ROOT / "plugins" / "codex-control-plane-hooks" / "hooks" / "hooks.json").read_text(encoding="utf-8")
         )
         commands = [
             handler
@@ -109,18 +212,10 @@ class ReleaseLayoutTests(unittest.TestCase):
             self.assertIn("$env:PLUGIN_ROOT", handler["commandWindows"])
             self.assertIn("run_control_plane_hook.ps1", handler["commandWindows"])
         powershell_launcher = (
-            ROOT
-            / "plugins"
-            / "codex-control-plane-hooks"
-            / "scripts"
-            / "run_control_plane_hook.ps1"
+            ROOT / "plugins" / "codex-control-plane-hooks" / "scripts" / "run_control_plane_hook.ps1"
         ).read_text(encoding="utf-8")
         cmd_shim = (
-            ROOT
-            / "plugins"
-            / "codex-control-plane-hooks"
-            / "scripts"
-            / "run_control_plane_hook.cmd"
+            ROOT / "plugins" / "codex-control-plane-hooks" / "scripts" / "run_control_plane_hook.cmd"
         ).read_text(encoding="utf-8")
         self.assertIn('-Name "py.exe"', powershell_launcher)
         self.assertIn('-Name "python.exe"', powershell_launcher)
@@ -130,13 +225,7 @@ class ReleaseLayoutTests(unittest.TestCase):
 
     def test_manifest_covers_nested_exec_and_posttool_reads(self) -> None:
         hooks = json.loads(
-            (
-                ROOT
-                / "plugins"
-                / "codex-control-plane-hooks"
-                / "hooks"
-                / "hooks.json"
-            ).read_text(encoding="utf-8")
+            (ROOT / "plugins" / "codex-control-plane-hooks" / "hooks" / "hooks.json").read_text(encoding="utf-8")
         )
         pretool = hooks["hooks"]["PreToolUse"][0]["matcher"]
         permission = hooks["hooks"]["PermissionRequest"][0]["matcher"]
@@ -149,9 +238,7 @@ class ReleaseLayoutTests(unittest.TestCase):
         private_path = "C:\\" + "Users" + r"\example\project"
         private_unc_path = "\\\\" + "server" + r"\share" + "\\" + "Users" + r"\example\project"
         private_extended_path = "\\\\?\\" + "C:\\" + "Users" + r"\example\project"
-        private_extended_unc_path = (
-            "\\\\?\\UNC\\" + "server" + r"\share" + "\\" + "Users" + r"\example\project"
-        )
+        private_extended_unc_path = "\\\\?\\UNC\\" + "server" + r"\share" + "\\" + "Users" + r"\example\project"
         candidates = [
             private_path,
             private_unc_path,
@@ -164,9 +251,7 @@ class ReleaseLayoutTests(unittest.TestCase):
         ]
         for candidate in candidates:
             with self.subTest(candidate=candidate):
-                self.assertTrue(
-                    any(pattern.search(candidate) for _, pattern in CHECKER.GENERIC_PRIVATE_PATTERNS)
-                )
+                self.assertTrue(any(pattern.search(candidate) for _, pattern in CHECKER.GENERIC_PRIVATE_PATTERNS))
 
         errors: list[str] = []
         with tempfile.NamedTemporaryFile(dir=ROOT, suffix=".db", delete=False) as stream:

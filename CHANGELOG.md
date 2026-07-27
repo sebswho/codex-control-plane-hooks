@@ -4,6 +4,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+- Added explicit Windows Python 3.12 runtime setup with deterministic plugin-data discovery, staged venv smoke, atomic `runtime.json` publication, idempotent reuse, reparse-point rejection, and opt-in pruning that protects current, retained, active, or uninspectable versions. The existing launcher remains unchanged until the follow-up manifest-driven launcher migration.
+
 ## [0.2.6] - 2026-07-23
 
 - Bound the approved push URL, resolved source branch, commit OID, object format, and object database inside the private one-time ticket; the network child now pushes the immutable OID from an isolated bare repository with frozen credential/HTTP config and no workspace-local rewrites or hooks. Requested upstream metadata is restored only after remote success and a fresh `origin` revalidation, while the receipt preserves remote success if that local restoration fails.

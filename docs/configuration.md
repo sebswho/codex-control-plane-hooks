@@ -9,6 +9,18 @@ On macOS and Linux, the Hook resolves policy in this order:
 
 On Windows, `PLUGIN_DATA` is required and policy must remain at `PLUGIN_DATA/policy.json`. External policy paths fail closed because this dependency-free Hook cannot independently validate arbitrary NTFS DACLs. If the default policy does not exist, organization-specific detection and all natural-language approvals remain disabled.
 
+## Windows runtime setup
+
+The manifest-driven Windows launcher uses `PLUGIN_DATA/runtime.json`, created by `scripts/setup_runtime.ps1`. Setup requires an absolute Python 3.12 interpreter and never downloads Python:
+
+```powershell
+.\setup_runtime.ps1 -PythonPath "C:\absolute\path\to\python.exe"
+```
+
+Plugin data is selected in this order: absolute `-PluginDataPath`, absolute host `PLUGIN_DATA`, then a unique plugin-name candidate under absolute `-CodexHome` or the Windows user profile's default `.codex` directory. Paths outside `plugins\data`, relative paths, zero or multiple candidates, and observed reparse points fail closed.
+
+Runtime versions live below `%USERPROFILE%\.codex\runtimes\codex-control-plane-hooks\versions`. Setup creates and smokes a staging venv before atomically publishing `runtime.json`; a failed run leaves the previous manifest usable. Re-running setup is idempotent. Old versions remain by default. `-PruneOldRuntime -Keep N` requires `N >= 2`, protects the current version, and skips active or uninspectable candidates. The venv depends on its base Python 3.12 installation and is not a self-contained distribution.
+
 ## Policy fields
 
 | Field | Type | Default | Meaning |

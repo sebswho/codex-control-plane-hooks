@@ -10,7 +10,9 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,15 +90,68 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
-def release_files(root: Path = ROOT) -> list[Path]:
-    files: list[Path] = []
+def _walk_release_entries(root: Path) -> list[Path]:
+    entries: list[Path] = []
     for path in root.rglob("*"):
         relative = path.relative_to(root)
         if any(part in {".git", "__pycache__"} for part in relative.parts):
             continue
-        if path.is_file() and not path.is_symlink():
-            files.append(path)
-    return sorted(files)
+        entries.append(path)
+    return sorted(entries)
+
+
+def _git_toplevel(root: Path) -> Path | None:
+    completed = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    try:
+        return Path(os.fsdecode(completed.stdout.strip())).resolve()
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+def release_entries(root: Path = ROOT) -> list[Path]:
+    try:
+        if _git_toplevel(root) != root.resolve():
+            return _walk_release_entries(root)
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return _walk_release_entries(root)
+    if completed.returncode != 0:
+        return _walk_release_entries(root)
+
+    entries: list[Path] = []
+    for encoded in completed.stdout.split(b"\0"):
+        if not encoded:
+            continue
+        relative = Path(os.fsdecode(encoded))
+        if relative.is_absolute() or ".." in relative.parts:
+            continue
+        path = root / relative
+        if path.exists() or path.is_symlink():
+            entries.append(path)
+    return sorted(entries)
+
+
+def release_files(root: Path = ROOT) -> list[Path]:
+    return [path for path in release_entries(root) if path.is_file() and not path.is_symlink()]
 
 
 def _load_private_patterns(path: Path | None) -> list[tuple[str, re.Pattern[str]]]:
@@ -140,32 +195,139 @@ def _load_private_patterns(path: Path | None) -> list[tuple[str, re.Pattern[str]
     return patterns
 
 
-def _read_release_text(path: Path, errors: list[str]) -> str | None:
+def _git_index_entries(
+    root: Path = ROOT,
+) -> Iterator[tuple[Path, str, bytes | None]]:
+    has_git_metadata = (root / ".git").exists()
+    if not has_git_metadata:
+        return
+    try:
+        if _git_toplevel(root) != root.resolve():
+            raise ValueError("Git index root does not match the release tree")
+        completed = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--stage", "-z"],
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise ValueError("Git index could not be inspected") from exc
+    if completed.returncode != 0:
+        raise ValueError("Git index could not be inspected")
+
+    for encoded in completed.stdout.split(b"\0"):
+        if not encoded:
+            continue
+        try:
+            metadata, encoded_path = encoded.split(b"\t", 1)
+            mode, object_id, stage = metadata.decode("ascii").split()
+        except (UnicodeError, ValueError) as exc:
+            raise ValueError("Git index metadata could not be parsed") from exc
+        relative = Path(os.fsdecode(encoded_path))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("Git index contains an unsafe path")
+        if stage != "0":
+            raise ValueError(f"Git index contains an unresolved entry: {relative}")
+        blob_size = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "-s", object_id],
+            capture_output=True,
+            check=False,
+        )
+        if blob_size.returncode != 0:
+            raise ValueError(f"Git index blob size could not be read: {relative}")
+        try:
+            size = int(blob_size.stdout.strip())
+        except ValueError as exc:
+            raise ValueError(f"Git index blob size could not be parsed: {relative}") from exc
+        if size > MAX_SCAN_FILE_BYTES:
+            yield relative, mode, None
+            continue
+        blob = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "blob", object_id],
+            capture_output=True,
+            check=False,
+        )
+        if blob.returncode != 0:
+            raise ValueError(f"Git index blob could not be read: {relative}")
+        yield relative, mode, blob.stdout
+
+
+def _read_release_bytes(path: Path, errors: list[str]) -> bytes | None:
     relative = path.relative_to(ROOT)
     try:
         size = path.stat().st_size
         if size > MAX_SCAN_FILE_BYTES:
             errors.append(f"oversized release file: {relative}")
             return None
-        data = path.read_bytes()
+        return path.read_bytes()
     except OSError:
         errors.append(f"unreadable release file: {relative}")
+        return None
+
+
+def _decode_release_text(
+    relative: Path,
+    data: bytes,
+    errors: list[str],
+    *,
+    source: str = "",
+) -> str | None:
+    display = f"{source}{relative}"
+    if len(data) > MAX_SCAN_FILE_BYTES:
+        errors.append(f"oversized release file: {display}")
         return None
     try:
         if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
             return data.decode("utf-16")
         if b"\x00" in data:
-            errors.append(f"binary release file is not allowed: {relative}")
+            errors.append(f"binary release file is not allowed: {display}")
             return None
         return data.decode("utf-8-sig")
     except UnicodeDecodeError:
         kind = (
             "text-like file is not valid UTF-8/UTF-16"
-            if path.suffix.lower() in TEXT_LIKE_SUFFIXES
+            if relative.suffix.lower() in TEXT_LIKE_SUFFIXES
             else "binary release file is not allowed"
         )
-        errors.append(f"{kind}: {relative}")
+        errors.append(f"{kind}: {display}")
         return None
+
+
+def _read_release_text(path: Path, errors: list[str]) -> str | None:
+    data = _read_release_bytes(path, errors)
+    if data is None:
+        return None
+    return _decode_release_text(path.relative_to(ROOT), data, errors)
+
+
+def _scan_release_data(
+    relative: Path,
+    data: bytes,
+    patterns: list[tuple[str, re.Pattern[str]]],
+    errors: list[str],
+    *,
+    source: str = "",
+) -> None:
+    display = f"{source}{relative}"
+    relative_text = relative.as_posix()
+    if relative.suffix.lower() in FORBIDDEN_RELEASE_SUFFIXES:
+        errors.append(f"credential container is not allowed in release tree: {display}")
+    for rule_id, pattern in patterns:
+        if pattern.search(relative_text):
+            errors.append(f"private marker {rule_id} in path: {display}")
+    text = _decode_release_text(relative, data, errors, source=source)
+    if text is None:
+        return
+    for rule_id, pattern in patterns:
+        if pattern.search(text):
+            errors.append(f"private marker {rule_id} in {display}")
+    for rule_id, pattern in SECRET_PATTERNS:
+        if pattern.search(text):
+            errors.append(f"credential-like literal {rule_id} in {display}")
+    if relative.suffix == ".py":
+        try:
+            ast.parse(text, filename=str(display))
+        except SyntaxError as exc:
+            errors.append(f"invalid Python syntax in {display}: {exc}")
 
 
 def _scan_release_files(
@@ -174,34 +336,30 @@ def _scan_release_files(
 ) -> int:
     patterns = [*GENERIC_PRIVATE_PATTERNS, *private_patterns]
     files = release_files()
-    for path in ROOT.rglob("*"):
+    worktree_data: dict[Path, bytes] = {}
+    for path in release_entries():
         relative = path.relative_to(ROOT)
-        if any(part in {".git", "__pycache__"} for part in relative.parts):
-            continue
         if path.is_symlink():
             errors.append(f"symlink is not allowed in release tree: {relative}")
     for path in files:
         relative = path.relative_to(ROOT)
-        relative_text = relative.as_posix()
-        if path.suffix.lower() in FORBIDDEN_RELEASE_SUFFIXES:
-            errors.append(f"credential container is not allowed in release tree: {relative}")
-        for rule_id, pattern in patterns:
-            if pattern.search(relative_text):
-                errors.append(f"private marker {rule_id} in path: {relative}")
-        text = _read_release_text(path, errors)
-        if text is None:
+        data = _read_release_bytes(path, errors)
+        if data is None:
             continue
-        for rule_id, pattern in patterns:
-            if pattern.search(text):
-                errors.append(f"private marker {rule_id} in {relative}")
-        for rule_id, pattern in SECRET_PATTERNS:
-            if pattern.search(text):
-                errors.append(f"credential-like literal {rule_id} in {relative}")
-        if path.suffix == ".py":
-            try:
-                ast.parse(text, filename=str(relative))
-            except SyntaxError as exc:
-                errors.append(f"invalid Python syntax in {relative}: {exc}")
+        worktree_data[relative] = data
+        _scan_release_data(relative, data, patterns, errors)
+    try:
+        for relative, mode, data in _git_index_entries():
+            if mode == "120000":
+                errors.append(f"symlink is not allowed in staged release tree: {relative}")
+            if data is None:
+                errors.append(f"oversized release file: staged {relative}")
+                continue
+            if worktree_data.get(relative) == data:
+                continue
+            _scan_release_data(relative, data, patterns, errors, source="staged ")
+    except (OSError, ValueError) as exc:
+        errors.append(str(exc) or "Git index could not be inspected")
     return len(files)
 
 
