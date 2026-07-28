@@ -231,8 +231,9 @@ The checker scans bounded release files, source, filenames, and compound-suffix 
 | 0.145.0-alpha.18 bundled desktop CLI | macOS arm64 | 3.9.6 | 218 local tests plus manifest, release, and plugin checks | clean-profile install, Hook discovery/trust, safe allow, dangerous deny, and cross-turn publication resume | 2026-07-21 |
 | 0.144.5 bundled desktop CLI | macOS arm64 | 3.9.6 | 205 local tests plus manifest, release, and plugin checks | clean-profile install, Hook discovery/trust, safe allow, and dangerous deny | 2026-07-17 |
 | GitHub Actions with `@openai/codex@0.144.4` | Ubuntu 24.04 x64 | 3.9 / 3.12 | required on every push and PR | pinned clean-profile host smoke required by CI | 2026-07-17 |
-| GitHub Actions with `@openai/codex@0.144.4` | Windows Server 2022 x64 | 3.9 / 3.12 | protocol plus `pwsh` and `powershell.exe` gates | pinned clean-profile host smoke required by CI | 2026-07-17 |
-| Dedicated Windows runtime setup | Windows Server 2022 x64 | 3.12 | PowerShell 5.1 full setup contract; PowerShell 7 bootstrap smoke | Windows 10 Codex Desktop trust/cache validation remains required before release | 2026-07-24 |
+| GitHub Actions with `@openai/codex@0.144.4` | Windows Server 2022 x64 | 3.9 / 3.12 | 两个 Python 版本均运行协议测试；仅 3.12 运行 `pwsh` 与 `powershell.exe` 打包门禁 | pinned clean-profile host smoke required by CI | 2026-07-28 |
+| Dedicated Windows runtime setup | Windows Server 2022 x64 | 3.12 | PowerShell 5.1/7 固定运行时 setup、严格清单与 Hook 协议 | Windows Host smoke 由 CI 验证 | 2026-07-28 |
+| 手工 Windows 10 门禁 | Windows 10 IoT Enterprise LTSC `10.0.19044` | 3.12 | PowerShell 5.1 与 PowerShell 7.6.4 打包 Hook 均通过 | Codex CLI 0.145.0 隔离 Host discovery、trust 写入/重读与运行时通过；Desktop UI 特有缓存行为尚未单独验证 | 2026-07-28 |
 
 Runtime support and Codex-host compatibility are separate claims. Hook event names, matchers, output schemas, environment variables, and trust behavior can change between Codex versions.
 

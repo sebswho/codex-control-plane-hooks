@@ -308,7 +308,8 @@ try {
     if (-not (Test-Path -LiteralPath $interpreter -PathType Leaf)) {
         throw "Runtime interpreter does not exist"
     }
-    Lock-DirectoryChain -Path $versionDirectory -Locks $pathLocks
+    $scriptsDirectory = [System.IO.Directory]::GetParent($interpreter).FullName
+    Lock-DirectoryChain -Path $scriptsDirectory -Locks $pathLocks
     Lock-FileAgainstReplacement -Path $interpreter -Locks $pathLocks
     $hookScript = Join-Path $PSScriptRoot "control_plane_hook.py"
     if (-not (Test-Path -LiteralPath $hookScript -PathType Leaf)) {
@@ -337,21 +338,21 @@ kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
 open_event = kernel32.OpenEventW
 open_event.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_wchar_p]
 open_event.restype = ctypes.c_void_p
+set_event = kernel32.SetEvent
+set_event.argtypes = [ctypes.c_void_p]
+set_event.restype = ctypes.c_int
+close_handle = kernel32.CloseHandle
+close_handle.argtypes = [ctypes.c_void_p]
+close_handle.restype = ctypes.c_int
 event_handle = open_event(0x0002, 0, event_name)
-if not event_handle or not kernel32.SetEvent(event_handle):
+if not event_handle or not set_event(event_handle):
     sys.stderr.write('codex-control-plane-hooks: runtime verification failed\n')
     raise SystemExit(126)
-kernel32.CloseHandle(event_handle)
+close_handle(event_handle)
 
 hook_path = sys.argv[1]
 sys.argv = [hook_path]
-try:
-    runpy.run_path(hook_path, run_name='__main__')
-except SystemExit:
-    raise
-except BaseException:
-    sys.stderr.write('codex-control-plane-hooks: hook execution failed\n')
-    raise SystemExit(126)
+runpy.run_path(hook_path, run_name='__main__')
 '@
 
 $childExit = 126

@@ -26,7 +26,26 @@ DEFAULT_CWD = tempfile.gettempdir()
 
 class HookProtocolTests(unittest.TestCase):
     @staticmethod
-    def cleanup_runtime_version(path: Path) -> None:
+    def cleanup_owned_runtime_version(path: Path, marker: Path, token: str) -> None:
+        versions_root = (
+            Path.home()
+            / ".codex"
+            / "runtimes"
+            / "codex-control-plane-hooks"
+            / "versions"
+        )
+        runtime_id = path.name
+        safe_id = (
+            runtime_id.startswith("py312-")
+            and len(runtime_id) == 22
+            and all(character in "0123456789abcdef" for character in runtime_id[6:])
+        )
+        try:
+            owned = marker.is_file() and marker.read_text(encoding="ascii") == token
+        except OSError:
+            owned = False
+        if path.parent != versions_root or not safe_id or not owned:
+            return
         if path.is_junction() or path.is_symlink():
             os.rmdir(path)
         else:
@@ -160,7 +179,6 @@ class HookProtocolTests(unittest.TestCase):
                 / "versions"
             )
             runtime_root.mkdir(parents=True, exist_ok=True)
-            versions_before = set(runtime_root.iterdir())
             setup = subprocess.run(
                 [
                     str(powershell),
@@ -182,8 +200,21 @@ class HookProtocolTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(0, setup.returncode, setup.stderr)
-            for created in set(runtime_root.iterdir()) - versions_before:
-                self.addCleanup(self.cleanup_runtime_version, created)
+            manifest = json.loads(
+                (plugin_data / "runtime.json").read_text(encoding="utf-8")
+            )
+            created = Path(manifest["interpreter"]).parents[1]
+            self.assertEqual(runtime_root, created.parent)
+            ownership_token = os.urandom(16).hex()
+            ownership_marker = created / ".codex-test-owner"
+            with ownership_marker.open("x", encoding="ascii") as marker_file:
+                marker_file.write(ownership_token)
+            self.addCleanup(
+                self.cleanup_owned_runtime_version,
+                created,
+                ownership_marker,
+                ownership_token,
+            )
         if before_launch is not None:
             before_launch(plugin_data)
         environment = os.environ.copy()
@@ -210,6 +241,13 @@ class HookProtocolTests(unittest.TestCase):
             check=False,
         )
         return completed, plugin_data
+
+    def windows_launcher_shells(self) -> list[tuple[str, str | Path | None]]:
+        shells: list[tuple[str, str | Path | None]] = [("powershell-5.1", None)]
+        pwsh = shutil.which("pwsh")
+        if pwsh is not None:
+            shells.append(("powershell-7", pwsh))
+        return shells
 
     def prompt(self, text: str, *, cwd: str = DEFAULT_CWD) -> dict:
         return self.run_hook({"hook_event_name": "UserPromptSubmit", "prompt": text, "cwd": cwd})
@@ -1265,14 +1303,15 @@ class HookProtocolTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows launcher runtime test")
     def test_windows_launcher_rejects_a_corrupt_manifest_without_fallback(self) -> None:
-        completed, plugin_data = self.run_windows_launcher_fixture(
-            manifest_text="{"
-        )
-
-        self.assertEqual(126, completed.returncode, completed.stderr)
-        self.assertEqual("", completed.stdout)
-        self.assertIn("runtime manifest is invalid", completed.stderr)
-        self.assertNotIn(str(plugin_data), completed.stderr)
+        for shell_name, launcher_shell in self.windows_launcher_shells():
+            with self.subTest(shell=shell_name):
+                completed, plugin_data = self.run_windows_launcher_fixture(
+                    manifest_text="{", launcher_shell=launcher_shell
+                )
+                self.assertEqual(126, completed.returncode, completed.stderr)
+                self.assertEqual("", completed.stdout)
+                self.assertIn("runtime manifest is invalid", completed.stderr)
+                self.assertNotIn(str(plugin_data), completed.stderr)
 
     @unittest.skipUnless(os.name == "nt", "Windows launcher runtime test")
     def test_windows_launcher_rejects_untrusted_manifest_shapes(self) -> None:
@@ -1298,15 +1337,17 @@ class HookProtocolTests(unittest.TestCase):
                 '"configured_at":"2026-07-28T00:00:00.0000000Z"}'
             ),
         }
-        for name, manifest_text in cases.items():
-            with self.subTest(name=name):
-                completed, plugin_data = self.run_windows_launcher_fixture(
-                    manifest_text=manifest_text
-                )
-                self.assertEqual(126, completed.returncode, completed.stderr)
-                self.assertEqual("", completed.stdout)
-                self.assertIn("runtime manifest is invalid", completed.stderr)
-                self.assertNotIn(str(plugin_data), completed.stderr)
+        for shell_name, launcher_shell in self.windows_launcher_shells():
+            for name, manifest_text in cases.items():
+                with self.subTest(shell=shell_name, name=name):
+                    completed, plugin_data = self.run_windows_launcher_fixture(
+                        manifest_text=manifest_text,
+                        launcher_shell=launcher_shell,
+                    )
+                    self.assertEqual(126, completed.returncode, completed.stderr)
+                    self.assertEqual("", completed.stdout)
+                    self.assertIn("runtime manifest is invalid", completed.stderr)
+                    self.assertNotIn(str(plugin_data), completed.stderr)
 
     @unittest.skipUnless(os.name == "nt", "Windows launcher runtime test")
     def test_windows_launcher_rejects_untrusted_manifest_encodings_and_sizes(
@@ -1318,14 +1359,16 @@ class HookProtocolTests(unittest.TestCase):
             "invalid UTF-8": b"\xff",
             "oversized": b" " * 16385,
         }
-        for name, manifest_bytes in cases.items():
-            with self.subTest(name=name):
-                completed, _ = self.run_windows_launcher_fixture(
-                    manifest_text=None,
-                    manifest_bytes=manifest_bytes,
-                )
-                self.assertEqual(126, completed.returncode, completed.stderr)
-                self.assertIn("runtime manifest is invalid", completed.stderr)
+        for shell_name, launcher_shell in self.windows_launcher_shells():
+            for name, manifest_bytes in cases.items():
+                with self.subTest(shell=shell_name, name=name):
+                    completed, _ = self.run_windows_launcher_fixture(
+                        manifest_text=None,
+                        manifest_bytes=manifest_bytes,
+                        launcher_shell=launcher_shell,
+                    )
+                    self.assertEqual(126, completed.returncode, completed.stderr)
+                    self.assertIn("runtime manifest is invalid", completed.stderr)
 
     @unittest.skipUnless(
         os.name == "nt" and sys.version_info[:2] == (3, 12),
@@ -1385,7 +1428,9 @@ class HookProtocolTests(unittest.TestCase):
                 (plugin_data / "runtime.json").read_text(encoding="utf-8")
             )
             version_directory = Path(manifest["interpreter"]).parents[1]
-            junction_target = Path(self.temp.name) / "moved runtime"
+            junction_target = (
+                Path(self.temp.name) / f"moved runtime {version_directory.name}"
+            )
             shutil.move(version_directory, junction_target)
             comspec = os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")
             linked = subprocess.run(
@@ -1404,14 +1449,59 @@ class HookProtocolTests(unittest.TestCase):
             )
             self.assertEqual(0, linked.returncode, linked.stdout + linked.stderr)
 
-        completed, _ = self.run_windows_launcher_fixture(
-            manifest_text=None,
-            configure_runtime=True,
-            before_launch=replace_runtime_version_with_junction,
-        )
+        for shell_name, launcher_shell in self.windows_launcher_shells():
+            with self.subTest(shell=shell_name):
+                completed, _ = self.run_windows_launcher_fixture(
+                    manifest_text=None,
+                    configure_runtime=True,
+                    before_launch=replace_runtime_version_with_junction,
+                    launcher_shell=launcher_shell,
+                )
+                self.assertEqual(126, completed.returncode, completed.stderr)
+                self.assertIn("runtime manifest is invalid", completed.stderr)
 
-        self.assertEqual(126, completed.returncode, completed.stderr)
-        self.assertIn("runtime manifest is invalid", completed.stderr)
+    @unittest.skipUnless(
+        os.name == "nt" and sys.version_info[:2] == (3, 12),
+        "Windows Python 3.12 launcher runtime test",
+    )
+    def test_windows_launcher_rejects_a_reparse_point_at_scripts(self) -> None:
+        def replace_scripts_with_junction(plugin_data: Path) -> None:
+            manifest = json.loads(
+                (plugin_data / "runtime.json").read_text(encoding="utf-8")
+            )
+            scripts_directory = Path(manifest["interpreter"]).parent
+            junction_target = (
+                Path(self.temp.name)
+                / f"moved scripts {scripts_directory.parent.name}"
+            )
+            shutil.move(scripts_directory, junction_target)
+            comspec = os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")
+            linked = subprocess.run(
+                [
+                    comspec,
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(scripts_directory),
+                    str(junction_target),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, linked.returncode, linked.stdout + linked.stderr)
+
+        for shell_name, launcher_shell in self.windows_launcher_shells():
+            with self.subTest(shell=shell_name):
+                completed, _ = self.run_windows_launcher_fixture(
+                    manifest_text=None,
+                    configure_runtime=True,
+                    before_launch=replace_scripts_with_junction,
+                    launcher_shell=launcher_shell,
+                )
+                self.assertEqual(126, completed.returncode, completed.stderr)
+                self.assertIn("runtime manifest is invalid", completed.stderr)
 
     @unittest.skipUnless(
         os.name == "nt" and sys.version_info[:2] == (3, 12),
@@ -1452,6 +1542,73 @@ class HookProtocolTests(unittest.TestCase):
                 )
                 self.assertEqual(exit_code, completed.returncode, completed.stderr)
                 self.assertEqual(f"hook-{exit_code}", completed.stderr)
+
+    @unittest.skipUnless(
+        os.name == "nt" and sys.version_info[:2] == (3, 12),
+        "Windows Python 3.12 launcher runtime test",
+    )
+    def test_windows_launcher_preserves_an_unhandled_hook_exception(self) -> None:
+        completed, _ = self.run_windows_launcher_fixture(
+            manifest_text=None,
+            configure_runtime=True,
+            hook_source="raise RuntimeError('hook-boom')\n",
+        )
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertIn("RuntimeError: hook-boom", completed.stderr)
+        self.assertNotIn("hook execution failed", completed.stderr)
+
+    @unittest.skipUnless(
+        os.name == "nt" and sys.version_info[:2] != (3, 12),
+        "Windows non-3.12 launcher version test",
+    )
+    def test_windows_launcher_rejects_a_real_non312_runtime_before_hook(self) -> None:
+        versions_root = (
+            Path.home()
+            / ".codex"
+            / "runtimes"
+            / "codex-control-plane-hooks"
+            / "versions"
+        )
+        versions_root.mkdir(parents=True, exist_ok=True)
+        runtime_id = "py312-" + os.urandom(8).hex()
+        version_directory = versions_root / runtime_id
+        created = subprocess.run(
+            [sys.executable, "-I", "-S", "-m", "venv", str(version_directory)],
+            text=True,
+            capture_output=True,
+            timeout=90,
+            check=False,
+        )
+        self.assertEqual(0, created.returncode, created.stderr)
+        ownership_token = os.urandom(16).hex()
+        ownership_marker = version_directory / ".codex-test-owner"
+        ownership_marker.write_text(ownership_token, encoding="ascii")
+        self.addCleanup(
+            self.cleanup_owned_runtime_version,
+            version_directory,
+            ownership_marker,
+            ownership_token,
+        )
+        interpreter = version_directory / "Scripts" / "python.exe"
+        manifest = json.dumps(
+            {
+                "schema_version": 1,
+                "interpreter": str(interpreter),
+                "python_version": "3.12.0",
+                "runtime_root": str(versions_root.parent),
+                "configured_at": "2026-07-28T00:00:00.0000000Z",
+            }
+        )
+        hook_marker = Path(self.temp.name) / "hook-ran"
+        completed, _ = self.run_windows_launcher_fixture(
+            manifest_text=manifest,
+            hook_source=f"from pathlib import Path\nPath({str(hook_marker)!r}).touch()\n",
+        )
+
+        self.assertEqual(126, completed.returncode, completed.stderr)
+        self.assertFalse(hook_marker.exists())
+        self.assertIn("Python 3.12", completed.stderr)
 
     def test_malformed_present_policy_fails_closed(self) -> None:
         Path(self.data_dir, "policy.json").write_text("{", encoding="utf-8")

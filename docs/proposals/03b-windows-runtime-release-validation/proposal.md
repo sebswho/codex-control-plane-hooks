@@ -27,7 +27,9 @@
 - [x] 将完整 Windows 启动器冒烟限定到 Python 3.12 矩阵项。
 - [x] 更新 README、配置、Hook 契约、贡献指南和变更记录。
 - [x] 运行完整测试、Ruff、插件校验和发布检查。
-- [ ] 完成手工 Windows 10 门禁。
+- [x] 在 Windows 10 `10.0.19044` 上完成 PowerShell 5.1 与 PowerShell 7.6.4 打包 Hook 手工门禁。
+- [x] 在隔离 `CODEX_HOME` 中完成 Codex CLI 0.145.0 Host discovery、untrusted→trusted 写入/重读与 Hook 运行时门禁。
+- [ ] 单独验证 Windows 10 Codex Desktop 的 Hook trust/cache 行为；当前仅记录为未验证，不作为已完成声明。
 - [ ] 完成规格与工程规范双审查并修复发现。
 
 ## 兼容性影响

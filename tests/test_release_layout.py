@@ -195,6 +195,7 @@ class ReleaseLayoutTests(unittest.TestCase):
         self.assertIn('"exec", "resume"', host_smoke)
         self.assertIn('"enable_scoped_git_transactions": True', host_smoke)
         self.assertIn("setup_runtime.ps1", host_smoke)
+        self.assertIn("root.mkdir(parents=True, exist_ok=True)", host_smoke)
 
     def test_every_command_hook_has_a_windows_override(self) -> None:
         hooks = json.loads(
@@ -236,6 +237,7 @@ class ReleaseLayoutTests(unittest.TestCase):
         self.assertIn("matrix.python == '3.12'", workflow)
         self.assertIn("setup_runtime.ps1", manifest_smoke)
         self.assertIn("-PluginDataPath", manifest_smoke)
+        self.assertNotIn("versions_before", manifest_smoke)
 
     def test_manifest_covers_nested_exec_and_posttool_reads(self) -> None:
         hooks = json.loads(
