@@ -46,7 +46,8 @@ class HookProtocolTests(unittest.TestCase):
             owned = False
         if path.parent != versions_root or not safe_id or not owned:
             return
-        if path.is_junction() or path.is_symlink():
+        is_junction = getattr(path, "is_junction", None)
+        if (callable(is_junction) and is_junction()) or path.is_symlink():
             os.rmdir(path)
         else:
             shutil.rmtree(path, True)
