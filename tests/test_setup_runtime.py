@@ -448,10 +448,11 @@ class RuntimeSetupTests(unittest.TestCase):
             root = Path(directory)
             plugin_data = self.make_plugin_data(root)
             source_link = root / "python-source"
-            self.make_junction(source_link, Path(sys.executable).parents[1])
+            interpreter = Path(sys.executable)
+            self.make_junction(source_link, interpreter.parent)
 
             completed = self.run_setup(
-                source_link / "Scripts" / "python.exe",
+                source_link / interpreter.name,
                 plugin_data=plugin_data,
             )
 

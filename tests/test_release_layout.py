@@ -146,7 +146,9 @@ class ReleaseLayoutTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "private marker ACL verification requires POSIX")
     def test_external_private_markers_are_detected_without_value_echo(self) -> None:
-        marker = "Version-scoped reference Hooks"
+        # Keep the synthetic marker out of this tracked source file so the
+        # release scan can only find its intended occurrence in README.md.
+        marker = "Version-scoped " + "reference Hooks"
         with tempfile.TemporaryDirectory() as directory:
             marker_file = Path(directory) / "private-patterns"
             marker_file.write_text(marker + "\n", encoding="utf-8")
@@ -166,6 +168,7 @@ class ReleaseLayoutTests(unittest.TestCase):
         output = completed.stdout + completed.stderr
         self.assertEqual(1, completed.returncode, output)
         self.assertIn("private marker private-001 in README.md", output)
+        self.assertNotIn("test_release_layout.py", output)
         self.assertNotIn(marker, output)
 
     def test_manifest_and_marketplace_versions_are_installable(self) -> None:
