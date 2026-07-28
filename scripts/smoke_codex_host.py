@@ -130,6 +130,46 @@ def install_checkout_plugin(codex: Path, environment: dict[str, str]) -> None:
     require(any(row.get(flag) is True for row in rows for flag in flags), "checkout plugin is not installed")
 
 
+def configure_windows_runtime(codex_home: Path) -> list[Path]:
+    if os.name != "nt":
+        return []
+    require(sys.version_info[:2] == (3, 12), "Windows host smoke requires Python 3.12")
+    plugin_data = installed_plugin_data(codex_home)
+    plugin_data.mkdir(parents=True, exist_ok=True)
+    versions_root = Path.home() / ".codex" / "runtimes" / PLUGIN / "versions"
+    versions_root.mkdir(parents=True, exist_ok=True)
+    versions_before = set(versions_root.iterdir())
+    powershell = (
+        Path(os.environ["SystemRoot"])
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+    completed = subprocess.run(
+        [
+            str(powershell),
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "plugins" / PLUGIN / "scripts" / "setup_runtime.ps1"),
+            "-PythonPath",
+            sys.executable,
+            "-PluginDataPath",
+            str(plugin_data),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=90,
+        check=False,
+    )
+    require(completed.returncode == 0, f"setup_runtime.ps1 failed: {completed.stderr}")
+    return list(set(versions_root.iterdir()) - versions_before)
+
+
 class AppServer:
     EOF = object()
 
@@ -691,11 +731,14 @@ def main() -> int:
     resolved = candidate if candidate.is_file() else shutil.which(args.codex)
     require(resolved is not None, f"Codex CLI executable was not found: {args.codex}")
     codex = Path(resolved).resolve()
-    with isolated_codex_home() as codex_home:
+    with isolated_codex_home() as codex_home, contextlib.ExitStack() as cleanup:
         environment = child_environment(codex_home)
         version = run_codex(codex, ["--version"], environment, ROOT).stdout.strip()
         require(version == f"codex-cli {args.expected_version}", f"unexpected Codex version: {version!r}")
         install_checkout_plugin(codex, environment)
+        created_versions = configure_windows_runtime(codex_home)
+        for runtime_version in created_versions:
+            cleanup.callback(shutil.rmtree, runtime_version, True)
         runtime_cwd = codex_home / "runtime-workspace"
         runtime_cwd.mkdir()
         verify_discovery_and_trust(codex, environment, codex_home, runtime_cwd)

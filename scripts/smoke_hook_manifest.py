@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,45 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_SOURCE = ROOT / "plugins" / "codex-control-plane-hooks"
 WINDOWS_SHELL_EXECUTABLES = {"pwsh": "pwsh", "powershell": "powershell.exe"}
+
+
+def _configure_windows_runtime(
+    plugin_root: Path, plugin_data: Path, windows_shell: str
+) -> list[Path]:
+    if sys.version_info[:2] != (3, 12):
+        raise RuntimeError("Windows manifest smoke requires Python 3.12")
+    versions_root = (
+        Path.home()
+        / ".codex"
+        / "runtimes"
+        / "codex-control-plane-hooks"
+        / "versions"
+    )
+    versions_root.mkdir(parents=True, exist_ok=True)
+    versions_before = set(versions_root.iterdir())
+    completed = subprocess.run(
+        [
+            WINDOWS_SHELL_EXECUTABLES[windows_shell],
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(plugin_root / "scripts" / "setup_runtime.ps1"),
+            "-PythonPath",
+            sys.executable,
+            "-PluginDataPath",
+            str(plugin_data),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=90,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"Windows runtime setup failed: {completed.stderr}")
+    return list(set(versions_root.iterdir()) - versions_before)
 
 
 def _pretool_handler(hooks: dict[str, Any]) -> dict[str, Any]:
@@ -84,11 +125,28 @@ def main() -> int:
         raise RuntimeError("--windows-shell is only supported on Windows")
     windows_shell = args.windows_shell or "pwsh"
 
-    with tempfile.TemporaryDirectory(prefix="codex hook manifest ") as directory:
+    with (
+        tempfile.TemporaryDirectory(prefix="codex hook manifest ") as directory,
+        contextlib.ExitStack() as cleanup,
+    ):
         root = Path(directory)
         plugin_root = root / "plugin root"
-        plugin_data = root / "plugin data"
+        plugin_data = (
+            root
+            / "codex home"
+            / "plugins"
+            / "data"
+            / "codex-control-plane-hooks"
+        )
         shutil.copytree(PLUGIN_SOURCE, plugin_root)
+        plugin_data.mkdir(parents=True)
+        created_versions = (
+            _configure_windows_runtime(plugin_root, plugin_data, windows_shell)
+            if os.name == "nt"
+            else []
+        )
+        for version in created_versions:
+            cleanup.callback(shutil.rmtree, version, True)
         hooks = json.loads((plugin_root / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         handler = _pretool_handler(hooks)
 

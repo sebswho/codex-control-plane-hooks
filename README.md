@@ -139,20 +139,20 @@ codex plugin marketplace upgrade codex-control-plane-hooks
 
 `v0.2.6` binds each approved push destination and source commit into a one-time ticket, runs the network child from an isolated bare repository, hardens reservation identity, and applies one shared deadline to Windows Python discovery and process-tree cleanup.
 
-### Prepare the dedicated Windows runtime
+### 准备 Windows 专用运行时
 
-Manifest-driven Windows builds require a one-time Python 3.12 runtime setup. The setup script does not download Python or install third-party packages; pass an existing absolute Python 3.12 interpreter:
+Windows 启动器只读取 `PLUGIN_DATA/runtime.json`，不会再从 `PATH`、`py.exe` 或 `python.exe` 猜测解释器。首次使用前必须运行一次 Python 3.12 运行时准备脚本。脚本不会下载 Python，也不会安装第三方包；请传入现有 Python 3.12 解释器的绝对路径：
 
 ```powershell
 .\plugins\codex-control-plane-hooks\scripts\setup_runtime.ps1 `
   -PythonPath "C:\absolute\path\to\python.exe"
 ```
 
-The script accepts host-provided `PLUGIN_DATA`, or discovers exactly one matching directory under `%USERPROFILE%\.codex\plugins\data`. Use an absolute `-PluginDataPath` or `-CodexHome` when discovery is ambiguous. Zero or multiple candidates fail without guessing.
+脚本优先使用宿主提供的 `PLUGIN_DATA`，也可以在 `%USERPROFILE%\.codex\plugins\data` 下发现唯一匹配目录。发现结果不唯一时，请显式传入绝对 `-PluginDataPath` 或 `-CodexHome`；脚本不会猜测。
 
-The dedicated venv is published under `%USERPROFILE%\.codex\runtimes\codex-control-plane-hooks\versions` and selected through an atomically written `runtime.json` in plugin data. Re-running setup reuses the same healthy runtime. Old versions are never removed by default; explicit `-PruneOldRuntime` keeps at least two versions and skips the current, active, reparse-point, or uninspectable candidates.
+专用 venv 位于 `%USERPROFILE%\.codex\runtimes\codex-control-plane-hooks\versions`，并通过原子写入插件数据目录的 `runtime.json` 进行选择。重复执行会复用健康运行时。默认不删除旧版本；显式使用 `-PruneOldRuntime` 时至少保留两个版本，并跳过当前、正在使用、包含 reparse point 或无法安全检查的目录。
 
-The venv still depends on the Python 3.12 installation that created it; it is isolated but not a self-contained Python distribution. Releases whose launcher still performs PATH discovery do not consume `runtime.json` until the manifest-driven launcher update is installed.
+该 venv 仍依赖创建它的 Python 3.12 安装：它是隔离环境，但不是自包含 Python 发行版。清单缺失时启动器返回 `127`；清单或固定路径无效、解释器无法启动、版本不是 Python 3.12 时返回 `126`。Hook 自身的退出码和标准流保持不变。
 
 ## Configure
 

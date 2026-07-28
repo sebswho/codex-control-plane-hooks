@@ -15,7 +15,7 @@ The plugin declares handlers for:
 
 Tool matchers currently include `Bash`, `exec_command`, nested `*__exec_command` names, `apply_patch`, `Edit`, `Write`, and `mcp__.*`; `PostToolUse` additionally includes `Read` for bounded local-source output checks. Host naming is version-specific. A tool omitted by the host or matcher receives no protection from this plugin. Matcher expansion changes the Hook trust hash and should be reviewed before trust is accepted again.
 
-Each command handler declares a POSIX `command` and a PowerShell `commandWindows`. Both resolve the script from host-provided `PLUGIN_ROOT`; Windows additionally requires host-provided `PLUGIN_DATA`. The native Windows entrypoint is a PowerShell 5.1/7 script with one shared five-second deadline across PATH-only `where.exe` discovery, Python probes, and process-tree cleanup; the `.cmd` launcher is a compatibility shim. Hook stdin is decoded as strict UTF-8 and stdout is emitted as ASCII-safe JSON.
+Each command handler declares a POSIX `command` and a PowerShell `commandWindows`. Both resolve the script from host-provided `PLUGIN_ROOT`; Windows additionally requires host-provided `PLUGIN_DATA`. Windows 原生入口兼容 PowerShell 5.1/7，只读取 `PLUGIN_DATA/runtime.json`，并在同一个固定 Python 3.12 子进程中完成版本验证和 Hook 执行；不会从 `PATH` 发现或回退解释器。`.cmd` 仅作为兼容入口。Hook stdin is decoded as strict UTF-8 and stdout is emitted as ASCII-safe JSON.
 
 ## Failure behavior
 
@@ -26,6 +26,7 @@ Each command handler declares a POSIX `command` and a PowerShell `commandWindows
 - Missing `session_id` blocks stateful events.
 - Unknown event names return an empty response because the plugin has no declared policy for them.
 - Hook timeout behavior belongs to the host and must be verified for each supported Codex version.
+- Windows 缺少 `PLUGIN_DATA` 或 `runtime.json` 时返回 `127`；清单、固定路径、reparse point、启动或 Python 版本无效时返回 `126`；Hook 自身退出码原样返回。
 
 ## Approval binding
 

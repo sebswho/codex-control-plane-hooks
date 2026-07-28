@@ -194,6 +194,7 @@ class ReleaseLayoutTests(unittest.TestCase):
         host_smoke = (ROOT / "scripts" / "smoke_codex_host.py").read_text(encoding="utf-8")
         self.assertIn('"exec", "resume"', host_smoke)
         self.assertIn('"enable_scoped_git_transactions": True', host_smoke)
+        self.assertIn("setup_runtime.ps1", host_smoke)
 
     def test_every_command_hook_has_a_windows_override(self) -> None:
         hooks = json.loads(
@@ -217,11 +218,24 @@ class ReleaseLayoutTests(unittest.TestCase):
         cmd_shim = (
             ROOT / "plugins" / "codex-control-plane-hooks" / "scripts" / "run_control_plane_hook.cmd"
         ).read_text(encoding="utf-8")
-        self.assertIn('-Name "py.exe"', powershell_launcher)
-        self.assertIn('-Name "python.exe"', powershell_launcher)
+        self.assertIn('Join-Path $pluginData "runtime.json"', powershell_launcher)
+        self.assertIn("$interpreter -I -S -c $bootstrap", powershell_launcher)
+        self.assertNotIn("where.exe", powershell_launcher)
+        self.assertNotIn("Find-CompatiblePython", powershell_launcher)
         self.assertIn("run_control_plane_hook.ps1", cmd_shim)
         attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
         self.assertIn("*.cmd text eol=crlf", attributes)
+
+    def test_windows_smokes_configure_the_pinned_runtime(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        manifest_smoke = (ROOT / "scripts" / "smoke_hook_manifest.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("matrix.python == '3.12'", workflow)
+        self.assertIn("setup_runtime.ps1", manifest_smoke)
+        self.assertIn("-PluginDataPath", manifest_smoke)
 
     def test_manifest_covers_nested_exec_and_posttool_reads(self) -> None:
         hooks = json.loads(
