@@ -27,7 +27,6 @@ SELECTOR = f"{PLUGIN}@{PLUGIN}"
 HOOKS_JSON = ROOT / "plugins" / PLUGIN / "hooks" / "hooks.json"
 PINNED_CODEX_VERSION = "0.144.4"
 SAFE_SENTINEL = "CODEX_HOST_SMOKE_SAFE"
-DANGEROUS_SENTINEL = "DANGEROUS_COMMAND_EXECUTED"
 MODEL = "host-smoke-model"
 PROVIDER = "host_smoke"
 CLI_BASE = ["--disable", "remote_plugin", "--disable", "plugin_sharing"]
@@ -65,12 +64,17 @@ def child_environment(codex_home: Path) -> dict[str, str]:
 
 def installed_plugin_data(codex_home: Path) -> Path:
     root = codex_home / "plugins" / "data"
+    root.mkdir(parents=True, exist_ok=True)
     candidates = sorted(
         path
         for path in root.iterdir()
         if path.is_dir()
         and (path.name == PLUGIN or path.name.startswith(f"{PLUGIN}-"))
     )
+    if not candidates:
+        candidate = root / PLUGIN
+        candidate.mkdir()
+        return candidate
     require(len(candidates) == 1, f"unexpected plugin-data directories: {candidates}")
     return candidates[0]
 
@@ -128,6 +132,42 @@ def install_checkout_plugin(codex: Path, environment: dict[str, str]) -> None:
     require(len(rows) == 1, "plugin list did not return exactly one checkout plugin")
     flags = ("installed", "isInstalled", "enabled", "isEnabled")
     require(any(row.get(flag) is True for row in rows for flag in flags), "checkout plugin is not installed")
+
+
+def configure_windows_runtime(codex_home: Path) -> None:
+    if os.name != "nt":
+        return
+    require(sys.version_info[:2] == (3, 12), "Windows host smoke requires Python 3.12")
+    plugin_data = installed_plugin_data(codex_home)
+    plugin_data.mkdir(parents=True, exist_ok=True)
+    powershell = (
+        Path(os.environ["SystemRoot"])
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+    completed = subprocess.run(
+        [
+            str(powershell),
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "plugins" / PLUGIN / "scripts" / "setup_runtime.ps1"),
+            "-PythonPath",
+            sys.executable,
+            "-PluginDataPath",
+            str(plugin_data),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=90,
+        check=False,
+    )
+    require(completed.returncode == 0, f"setup_runtime.ps1 failed: {completed.stderr}")
 
 
 class AppServer:
@@ -644,14 +684,29 @@ def verify_runtime(
 ) -> None:
     safe = runtime_case(codex, environment, cwd, "safe", f'python -c "print(\'{SAFE_SENTINEL}\')"')
     require(SAFE_SENTINEL in safe, "safe runtime command did not execute")
+    dangerous_marker = cwd / "dangerous-command-executed"
+    fallback = (
+        "from pathlib import Path; "
+        f"Path({str(dangerous_marker)!r}).write_text('executed')"
+    )
     dangerous = runtime_case(
         codex, environment, cwd, "dangerous",
-        "git commit -m codex-host-smoke || " f'python -c "print(\'{DANGEROUS_SENTINEL}\')"',
+        "git commit -m codex-host-smoke || " f'python -c "{fallback}"',
     )
-    require("git_non_read_only" in dangerous, "dangerous command was not denied for git_non_read_only")
+    legacy_denial = dangerous.startswith("Command blocked by PreToolUse hook:")
+    policy_denial = dangerous.rstrip().endswith("rejected: blocked by policy")
     require(
-        dangerous.startswith("Command blocked by PreToolUse hook:"),
+        legacy_denial or policy_denial,
         f"dangerous command did not return a Hook denial: {dangerous}",
+    )
+    if legacy_denial:
+        require(
+            "git_non_read_only" in dangerous,
+            f"legacy Hook denial omitted git_non_read_only: {dangerous}",
+        )
+    require(
+        not dangerous_marker.exists(),
+        f"dangerous fallback created its marker despite Hook denial: {dangerous}",
     )
     verify_transaction_resume(codex, environment, codex_home, cwd)
 
@@ -696,6 +751,7 @@ def main() -> int:
         version = run_codex(codex, ["--version"], environment, ROOT).stdout.strip()
         require(version == f"codex-cli {args.expected_version}", f"unexpected Codex version: {version!r}")
         install_checkout_plugin(codex, environment)
+        configure_windows_runtime(codex_home)
         runtime_cwd = codex_home / "runtime-workspace"
         runtime_cwd.mkdir()
         verify_discovery_and_trust(codex, environment, codex_home, runtime_cwd)

@@ -146,7 +146,8 @@ class ReleaseLayoutTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "private marker ACL verification requires POSIX")
     def test_external_private_markers_are_detected_without_value_echo(self) -> None:
-        marker = "Version-scoped reference Hooks"
+        readme_lines = (ROOT / "README.md").read_text(encoding="utf-8").splitlines()
+        marker = next(line for line in readme_lines if line.startswith("> "))
         with tempfile.TemporaryDirectory() as directory:
             marker_file = Path(directory) / "private-patterns"
             marker_file.write_text(marker + "\n", encoding="utf-8")
@@ -166,6 +167,7 @@ class ReleaseLayoutTests(unittest.TestCase):
         output = completed.stdout + completed.stderr
         self.assertEqual(1, completed.returncode, output)
         self.assertIn("private marker private-001 in README.md", output)
+        self.assertNotIn("test_release_layout.py", output)
         self.assertNotIn(marker, output)
 
     def test_manifest_and_marketplace_versions_are_installable(self) -> None:
@@ -194,6 +196,8 @@ class ReleaseLayoutTests(unittest.TestCase):
         host_smoke = (ROOT / "scripts" / "smoke_codex_host.py").read_text(encoding="utf-8")
         self.assertIn('"exec", "resume"', host_smoke)
         self.assertIn('"enable_scoped_git_transactions": True', host_smoke)
+        self.assertIn("setup_runtime.ps1", host_smoke)
+        self.assertIn("root.mkdir(parents=True, exist_ok=True)", host_smoke)
 
     def test_every_command_hook_has_a_windows_override(self) -> None:
         hooks = json.loads(
@@ -217,11 +221,36 @@ class ReleaseLayoutTests(unittest.TestCase):
         cmd_shim = (
             ROOT / "plugins" / "codex-control-plane-hooks" / "scripts" / "run_control_plane_hook.cmd"
         ).read_text(encoding="utf-8")
-        self.assertIn('-Name "py.exe"', powershell_launcher)
-        self.assertIn('-Name "python.exe"', powershell_launcher)
+        self.assertIn('Join-Path $pluginData "runtime.json"', powershell_launcher)
+        self.assertIn("$interpreter -I -S -c $bootstrap", powershell_launcher)
+        self.assertNotIn("where.exe", powershell_launcher)
+        self.assertNotIn("Find-CompatiblePython", powershell_launcher)
         self.assertIn("run_control_plane_hook.ps1", cmd_shim)
         attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
         self.assertIn("*.cmd text eol=crlf", attributes)
+
+    def test_windows_smokes_configure_the_pinned_runtime(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        manifest_smoke = (ROOT / "scripts" / "smoke_hook_manifest.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("matrix.python == '3.12'", workflow)
+        self.assertIn("setup_runtime.ps1", manifest_smoke)
+        self.assertIn("-PluginDataPath", manifest_smoke)
+        self.assertNotIn("versions_before", manifest_smoke)
+
+    def test_top_level_runtime_setup_delegates_to_packaged_script(self) -> None:
+        wrapper = (ROOT / "scripts" / "setup_runtime.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            r"plugins\codex-control-plane-hooks\scripts\setup_runtime.ps1",
+            wrapper,
+        )
+        self.assertIn("& $packagedScript @args", wrapper)
+        self.assertNotIn("function Initialize-NativeMethods", wrapper)
 
     def test_manifest_covers_nested_exec_and_posttool_reads(self) -> None:
         hooks = json.loads(

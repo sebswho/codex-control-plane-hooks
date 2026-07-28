@@ -6,7 +6,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -16,6 +15,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Callable
 from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "plugins" / "codex-control-plane-hooks" / "scripts"
@@ -25,6 +25,33 @@ DEFAULT_CWD = tempfile.gettempdir()
 
 
 class HookProtocolTests(unittest.TestCase):
+    @staticmethod
+    def cleanup_owned_runtime_version(path: Path, marker: Path, token: str) -> None:
+        versions_root = (
+            Path.home()
+            / ".codex"
+            / "runtimes"
+            / "codex-control-plane-hooks"
+            / "versions"
+        )
+        runtime_id = path.name
+        safe_id = (
+            runtime_id.startswith("py312-")
+            and len(runtime_id) == 22
+            and all(character in "0123456789abcdef" for character in runtime_id[6:])
+        )
+        try:
+            owned = marker.is_file() and marker.read_text(encoding="ascii") == token
+        except OSError:
+            owned = False
+        if path.parent != versions_root or not safe_id or not owned:
+            return
+        is_junction = getattr(path, "is_junction", None)
+        if (callable(is_junction) and is_junction()) or path.is_symlink():
+            os.rmdir(path)
+        else:
+            shutil.rmtree(path, True)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -96,6 +123,132 @@ class HookProtocolTests(unittest.TestCase):
             self.tool_sequence += 1
             payload["tool_use_id"] = f"tool-{self.tool_sequence}"
         return self.run_raw(json.dumps(payload), data_dir=data_dir)[1]
+
+    def run_windows_launcher_fixture(
+        self,
+        *,
+        manifest_text: str | None,
+        manifest_bytes: bytes | None = None,
+        hook_source: str = "raise SystemExit(37)\n",
+        payload: str | None = None,
+        configure_runtime: bool = False,
+        before_launch: Callable[[Path], None] | None = None,
+        launcher_shell: str | Path | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], Path]:
+        system32 = Path(os.environ["SystemRoot"]) / "System32"
+        powershell = system32 / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        root = Path(tempfile.mkdtemp(prefix="launcher-", dir=self.temp.name))
+        plugin_root = root / "plugin with spaces"
+        plugin_data = (
+            root
+            / "codex home with spaces"
+            / "plugins"
+            / "data"
+            / "codex-control-plane-hooks"
+        )
+        plugin_root.mkdir()
+        plugin_data.mkdir(parents=True)
+        launcher = plugin_root / "run_control_plane_hook.ps1"
+        shutil.copyfile(SCRIPTS / launcher.name, launcher)
+        (plugin_root / "control_plane_hook.py").write_text(
+            hook_source, encoding="utf-8"
+        )
+        if manifest_text is not None:
+            (plugin_data / "runtime.json").write_text(
+                manifest_text, encoding="utf-8"
+            )
+        if manifest_bytes is not None:
+            self.assertIsNone(manifest_text)
+            (plugin_data / "runtime.json").write_bytes(manifest_bytes)
+        if configure_runtime:
+            self.assertIsNone(manifest_text)
+            source_runtime = root / "source runtime"
+            source_setup = subprocess.run(
+                [sys.executable, "-I", "-S", "-m", "venv", str(source_runtime)],
+                text=True,
+                capture_output=True,
+                timeout=90,
+                check=False,
+            )
+            self.assertEqual(0, source_setup.returncode, source_setup.stderr)
+            source_python = source_runtime / "Scripts" / "python.exe"
+            runtime_root = (
+                Path.home()
+                / ".codex"
+                / "runtimes"
+                / "codex-control-plane-hooks"
+                / "versions"
+            )
+            runtime_root.mkdir(parents=True, exist_ok=True)
+            setup = subprocess.run(
+                [
+                    str(powershell),
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(SCRIPTS / "setup_runtime.ps1"),
+                    "-PythonPath",
+                    str(source_python),
+                    "-PluginDataPath",
+                    str(plugin_data),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=90,
+                check=False,
+            )
+            self.assertEqual(0, setup.returncode, setup.stderr)
+            manifest = json.loads(
+                (plugin_data / "runtime.json").read_text(encoding="utf-8")
+            )
+            created = Path(manifest["interpreter"]).parents[1]
+            self.assertEqual(runtime_root, created.parent)
+            ownership_token = os.urandom(16).hex()
+            ownership_marker = created / ".codex-test-owner"
+            with ownership_marker.open("x", encoding="ascii") as marker_file:
+                marker_file.write(ownership_token)
+            self.addCleanup(
+                self.cleanup_owned_runtime_version,
+                created,
+                ownership_marker,
+                ownership_token,
+            )
+        if before_launch is not None:
+            before_launch(plugin_data)
+        environment = os.environ.copy()
+        environment["PLUGIN_DATA"] = str(plugin_data)
+        environment["PATH"] = os.pathsep.join(
+            [str(system32)]
+        )
+        completed = subprocess.run(
+            [
+                str(launcher_shell or powershell),
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(launcher),
+            ],
+            input=payload,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            env=environment,
+            check=False,
+        )
+        return completed, plugin_data
+
+    def windows_launcher_shells(self) -> list[tuple[str, str | Path | None]]:
+        shells: list[tuple[str, str | Path | None]] = [("powershell-5.1", None)]
+        pwsh = shutil.which("pwsh")
+        if pwsh is not None:
+            shells.append(("powershell-7", pwsh))
+        return shells
 
     def prompt(self, text: str, *, cwd: str = DEFAULT_CWD) -> dict:
         return self.run_hook({"hook_event_name": "UserPromptSubmit", "prompt": text, "cwd": cwd})
@@ -1026,7 +1179,7 @@ class HookProtocolTests(unittest.TestCase):
         )
         self.assertEqual("0.2.6", manifest["version"])
 
-    def test_windows_launcher_validates_python3_before_selection(self) -> None:
+    def test_windows_launcher_is_manifest_only(self) -> None:
         powershell_launcher = (
             SCRIPTS / "run_control_plane_hook.ps1"
         ).read_text(encoding="utf-8")
@@ -1034,50 +1187,15 @@ class HookProtocolTests(unittest.TestCase):
             encoding="utf-8"
         )
         hooks = json.loads((SCRIPTS.parent / "hooks" / "hooks.json").read_text())
-        self.assertLess(
-            powershell_launcher.index('-Name "py.exe"'),
-            powershell_launcher.index('-Name "python.exe"'),
-        )
-        self.assertIn("$probeDeadlineMs = 5000", powershell_launcher)
-        self.assertIn("$probeTimeoutMs = 1500", powershell_launcher)
-        self.assertIn("$cleanupReserveMs = $taskkillTimeoutMs", powershell_launcher)
-        self.assertIn("[System.Diagnostics.Stopwatch]::StartNew()", powershell_launcher)
-        self.assertIn("Get-RemainingProbeMilliseconds", powershell_launcher)
-        self.assertEqual(
-            2,
-            powershell_launcher.count(
-                "Get-RemainingProbeWorkMilliseconds -Maximum $probeTimeoutMs"
-            ),
-        )
-        self.assertIn("Resolve-ApplicationPath", powershell_launcher)
-        self.assertIn('System32\\where.exe', powershell_launcher)
-        self.assertIn("$startInfo.Arguments = '$PATH:' + $Name", powershell_launcher)
-        self.assertNotIn("$startInfo.Arguments = $Name", powershell_launcher)
+        self.assertIn('Join-Path $pluginData "runtime.json"', powershell_launcher)
+        self.assertIn("[Environment]::GetFolderPath", powershell_launcher)
+        self.assertIn("$interpreter -I -S -c $bootstrap", powershell_launcher)
+        self.assertIn("runpy.run_path", powershell_launcher)
+        self.assertNotIn("where.exe", powershell_launcher)
         self.assertNotIn("Get-Command", powershell_launcher)
-        self.assertIn("WaitForExit($waitMs)", powershell_launcher)
-        self.assertIn("Kill($true)", powershell_launcher)
-        self.assertIn("taskkill.exe", powershell_launcher)
-        self.assertIn("WaitForExit($killWaitMs)", powershell_launcher)
-        taskkill_timeout = powershell_launcher.index(
-            "if (-not $killer.WaitForExit($killWaitMs))"
-        )
-        fallback_assignment = powershell_launcher.index(
-            "$fallbackRequired = $true", taskkill_timeout
-        )
-        direct_tree_kill = powershell_launcher.index(
-            "$Process.Kill($true)", fallback_assignment
-        )
-        self.assertLess(taskkill_timeout, fallback_assignment)
-        self.assertLess(fallback_assignment, direct_tree_kill)
-        self.assertIn("elseif ($killer.ExitCode -ne 0)", powershell_launcher)
-        self.assertIn("WaitForExit($terminationWaitMs)", powershell_launcher)
+        self.assertNotIn("py.exe", powershell_launcher)
+        self.assertNotIn("Find-CompatiblePython", powershell_launcher)
         self.assertNotIn("ReadToEnd", powershell_launcher)
-        self.assertIn("StandardOutput.ReadLine()", powershell_launcher)
-        self.assertIn("$process.ExitCode -eq 0", powershell_launcher)
-        self.assertIn("$process.StandardInput.Close()", powershell_launcher)
-        self.assertIn("$Process.Kill()", powershell_launcher)
-        self.assertIn('$env:PYTHON_MANAGER_AUTOMATIC_INSTALL = "0"', powershell_launcher)
-        self.assertIn("exit [int] $LASTEXITCODE", powershell_launcher)
         self.assertIn('set "ERRORLEVEL="', cmd_shim)
         self.assertIn(
             r'%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe',
@@ -1174,280 +1292,324 @@ class HookProtocolTests(unittest.TestCase):
                 )
 
     @unittest.skipUnless(os.name == "nt", "Windows launcher runtime test")
-    def test_windows_launcher_uses_each_python3_fallback(self) -> None:
-        launcher = SCRIPTS / "run_control_plane_hook.cmd"
-        comspec = os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")
-        system32 = Path(os.environ["SystemRoot"]) / "System32"
-        poison_source = system32 / "where.exe"
-        event = json.dumps(
-            {
-                "session_id": "windows-launcher-test",
-                "turn_id": "windows-launcher-turn",
-                "hook_event_name": "PreToolUse",
-                "tool_name": "Bash",
-                "tool_input": {"command": "pwd"},
-                "cwd": tempfile.gettempdir(),
-            },
-            ensure_ascii=False,
+    def test_windows_launcher_missing_manifest_never_falls_back_to_path(self) -> None:
+        completed, plugin_data = self.run_windows_launcher_fixture(
+            manifest_text=None
         )
 
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            plugin_data = root / "plugin-data"
-            plugin_data.mkdir()
-            fake_py = root / "py.exe"
-            shutil.copyfile(poison_source, fake_py)
-            environment = os.environ.copy()
-            environment["PLUGIN_DATA"] = str(plugin_data)
-            environment["ERRORLEVEL"] = "17"
-            environment["PATH"] = os.pathsep.join(
-                [str(root), str(Path(sys.executable).parent), str(system32)]
-            )
-            completed = subprocess.run(
-                [comspec, "/d", "/c", str(launcher)],
-                input=event,
-                text=True,
-                capture_output=True,
-                timeout=10,
-                env=environment,
-                check=False,
-            )
-            self.assertEqual(0, completed.returncode, completed.stderr)
-            self.assertEqual({}, json.loads(completed.stdout))
-
-        py_launcher = shutil.which("py.exe")
-        if not py_launcher:
-            return
-        probe_environment = os.environ.copy()
-        probe_environment["PYTHON_MANAGER_AUTOMATIC_INSTALL"] = "0"
-        py_probe = subprocess.run(
-            [
-                py_launcher,
-                "-3",
-                "-I",
-                "-S",
-                "-c",
-                (
-                    "import sys; raise SystemExit("
-                    "0 if sys.version_info >= (3, 9) else 1)"
-                ),
-            ],
-            text=True,
-            capture_output=True,
-            timeout=5,
-            env=probe_environment,
-            check=False,
-        )
-        if py_probe.returncode != 0:
-            return
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            plugin_data = root / "plugin-data"
-            plugin_data.mkdir()
-            fake_python = root / "python.exe"
-            shutil.copyfile(poison_source, fake_python)
-            environment = os.environ.copy()
-            environment["PLUGIN_DATA"] = str(plugin_data)
-            environment["ERRORLEVEL"] = "23"
-            environment["PATH"] = os.pathsep.join(
-                [str(root), str(Path(py_launcher).parent), str(system32)]
-            )
-            completed = subprocess.run(
-                [comspec, "/d", "/c", str(launcher)],
-                input=event,
-                text=True,
-                capture_output=True,
-                timeout=10,
-                env=environment,
-                check=False,
-            )
-            self.assertEqual(0, completed.returncode, completed.stderr)
-            self.assertEqual({}, json.loads(completed.stdout))
+        self.assertEqual(127, completed.returncode, completed.stderr)
+        self.assertEqual("", completed.stdout)
+        self.assertIn("runtime is not configured", completed.stderr)
+        self.assertNotIn(str(plugin_data), completed.stderr)
 
     @unittest.skipUnless(os.name == "nt", "Windows launcher runtime test")
-    def test_windows_launcher_preserves_child_exit_code(self) -> None:
-        system32 = Path(os.environ["SystemRoot"]) / "System32"
-        powershell = (
-            system32 / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "plugin with spaces"
-            root.mkdir()
-            launcher = root / "run_control_plane_hook.ps1"
-            shutil.copyfile(SCRIPTS / launcher.name, launcher)
-            (root / "control_plane_hook.py").write_text(
-                "raise SystemExit(37)\n", encoding="utf-8"
-            )
-            fake_py = root / "py.exe"
-            shutil.copyfile(system32 / "where.exe", fake_py)
-            environment = os.environ.copy()
-            environment["PATH"] = os.pathsep.join(
-                [str(root), str(Path(sys.executable).parent), str(system32)]
-            )
-            completed = subprocess.run(
-                [
-                    str(powershell),
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(launcher),
-                ],
-                text=True,
-                capture_output=True,
-                timeout=10,
-                env=environment,
-                check=False,
-            )
-            self.assertEqual(37, completed.returncode, completed.stderr)
+    def test_windows_launcher_rejects_a_corrupt_manifest_without_fallback(self) -> None:
+        for shell_name, launcher_shell in self.windows_launcher_shells():
+            with self.subTest(shell=shell_name):
+                completed, plugin_data = self.run_windows_launcher_fixture(
+                    manifest_text="{", launcher_shell=launcher_shell
+                )
+                self.assertEqual(126, completed.returncode, completed.stderr)
+                self.assertEqual("", completed.stdout)
+                self.assertIn("runtime manifest is invalid", completed.stderr)
+                self.assertNotIn(str(plugin_data), completed.stderr)
 
     @unittest.skipUnless(os.name == "nt", "Windows launcher runtime test")
-    def test_windows_launcher_ignores_python_executables_in_working_directory(
+    def test_windows_launcher_rejects_untrusted_manifest_shapes(self) -> None:
+        valid_fields = {
+            "schema_version": 1,
+            "interpreter": r"C:\runtime\Scripts\python.exe",
+            "python_version": "3.12.10",
+            "runtime_root": r"C:\runtime",
+            "configured_at": "2026-07-28T00:00:00.0000000Z",
+        }
+        cases = {
+            "root array": "[]",
+            "unsupported schema": json.dumps({**valid_fields, "schema_version": 2}),
+            "missing field": json.dumps(
+                {key: value for key, value in valid_fields.items() if key != "interpreter"}
+            ),
+            "unknown field": json.dumps({**valid_fields, "extra": True}),
+            "wrong field type": json.dumps({**valid_fields, "interpreter": 12}),
+            "duplicate field": (
+                '{"schema_version":1,"schema_version":1,'
+                '"interpreter":"C:\\\\runtime\\\\Scripts\\\\python.exe",'
+                '"python_version":"3.12.10","runtime_root":"C:\\\\runtime",'
+                '"configured_at":"2026-07-28T00:00:00.0000000Z"}'
+            ),
+        }
+        for shell_name, launcher_shell in self.windows_launcher_shells():
+            for name, manifest_text in cases.items():
+                with self.subTest(shell=shell_name, name=name):
+                    completed, plugin_data = self.run_windows_launcher_fixture(
+                        manifest_text=manifest_text,
+                        launcher_shell=launcher_shell,
+                    )
+                    self.assertEqual(126, completed.returncode, completed.stderr)
+                    self.assertEqual("", completed.stdout)
+                    self.assertIn("runtime manifest is invalid", completed.stderr)
+                    self.assertNotIn(str(plugin_data), completed.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "Windows launcher runtime test")
+    def test_windows_launcher_rejects_untrusted_manifest_encodings_and_sizes(
         self,
     ) -> None:
-        system32 = Path(os.environ["SystemRoot"]) / "System32"
-        powershell = system32 / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            launcher = root / "run_control_plane_hook.ps1"
-            shutil.copyfile(SCRIPTS / launcher.name, launcher)
-            (root / "control_plane_hook.py").write_text(
-                "raise SystemExit(37)\n", encoding="utf-8"
-            )
-            shutil.copyfile(system32 / "where.exe", root / "py.exe")
-            shutil.copyfile(system32 / "where.exe", root / "python.exe")
-            environment = os.environ.copy()
-            environment["PATH"] = os.pathsep.join(
-                [str(Path(sys.executable).parent), str(system32)]
-            )
-            completed = subprocess.run(
-                [
-                    str(powershell),
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(launcher),
-                ],
-                cwd=root,
-                text=True,
-                capture_output=True,
-                timeout=10,
-                env=environment,
-                check=False,
-            )
-            self.assertEqual(37, completed.returncode, completed.stderr)
-
-    @unittest.skipUnless(os.name == "nt", "Windows launcher runtime test")
-    def test_windows_launcher_bounds_hung_python_process_trees(self) -> None:
-        system_root = Path(os.environ["SystemRoot"])
-        powershell = system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-        csc_candidates = (
-            system_root / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "csc.exe",
-            system_root / "Microsoft.NET" / "Framework" / "v4.0.30319" / "csc.exe",
-        )
-        csc = next((candidate for candidate in csc_candidates if candidate.exists()), None)
-        if csc is None:
-            self.skipTest(".NET Framework C# compiler is unavailable")
-        source = r"""
-using System;
-using System.Diagnostics;
-using System.IO;
-using System.Threading;
-
-public static class Program {
-    public static void Main() {
-        var child = new ProcessStartInfo("cmd.exe", "/d /c ping -n 30 127.0.0.1");
-        child.UseShellExecute = false;
-        var childProcess = Process.Start(child);
-        var pidFile = Environment.GetEnvironmentVariable("PROBE_PID_FILE");
-        if (!String.IsNullOrEmpty(pidFile)) {
-            File.AppendAllText(
-                pidFile,
-                Process.GetCurrentProcess().Id.ToString() + Environment.NewLine +
-                childProcess.Id.ToString() + Environment.NewLine
-            );
+        cases = {
+            "empty": b"",
+            "UTF-8 BOM": b"\xef\xbb\xbf{}",
+            "invalid UTF-8": b"\xff",
+            "oversized": b" " * 16385,
         }
-        Thread.Sleep(30000);
-    }
-}
-"""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source_path = root / "Hang.cs"
-            source_path.write_text(source, encoding="utf-8")
-            fake_py = root / "py.exe"
-            compiled = subprocess.run(
-                [
-                    str(csc),
-                    "/nologo",
-                    "/target:exe",
-                    f"/out:{fake_py}",
-                    str(source_path),
-                ],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(0, compiled.returncode, compiled.stdout + compiled.stderr)
-            shutil.copyfile(fake_py, root / "python.exe")
-            environment = os.environ.copy()
-            environment["PATH"] = os.pathsep.join(
-                [str(root), str(system_root / "System32")]
-            )
-            pid_file = root / "probe-pids.txt"
-            environment["PROBE_PID_FILE"] = str(pid_file)
-            started = time.monotonic()
-            completed = subprocess.run(
-                [
-                    str(powershell),
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(SCRIPTS / "run_control_plane_hook.ps1"),
-                ],
-                text=True,
-                capture_output=True,
-                timeout=12,
-                env=environment,
-                check=False,
-            )
-            elapsed = time.monotonic() - started
-            self.assertEqual(127, completed.returncode, completed.stderr)
-            self.assertLess(elapsed, 7.0)
-            pids = {
-                int(line)
-                for line in pid_file.read_text(encoding="utf-8").splitlines()
-                if line.strip().isdigit()
-            }
-            self.assertGreaterEqual(len(pids), 2)
-
-            def running_pids() -> set[int]:
-                alive: set[int] = set()
-                for pid in pids:
-                    listed = subprocess.run(
-                        ["tasklist.exe", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                        text=True,
-                        capture_output=True,
-                        check=False,
+        for shell_name, launcher_shell in self.windows_launcher_shells():
+            for name, manifest_bytes in cases.items():
+                with self.subTest(shell=shell_name, name=name):
+                    completed, _ = self.run_windows_launcher_fixture(
+                        manifest_text=None,
+                        manifest_bytes=manifest_bytes,
+                        launcher_shell=launcher_shell,
                     )
-                    if re.search(rf'"{pid}"', listed.stdout):
-                        alive.add(pid)
-                return alive
+                    self.assertEqual(126, completed.returncode, completed.stderr)
+                    self.assertIn("runtime manifest is invalid", completed.stderr)
 
-            deadline = time.monotonic() + 2.0
-            remaining = running_pids()
-            while remaining and time.monotonic() < deadline:
-                time.sleep(0.05)
-                remaining = running_pids()
-            self.assertEqual(set(), remaining)
+    @unittest.skipUnless(
+        os.name == "nt" and sys.version_info[:2] == (3, 12),
+        "Windows Python 3.12 launcher runtime test",
+    )
+    def test_windows_launcher_uses_manifest_runtime_and_preserves_protocol(self) -> None:
+        completed, _ = self.run_windows_launcher_fixture(
+            manifest_text=None,
+            configure_runtime=True,
+            hook_source=(
+                "import sys\n"
+                "payload = sys.stdin.read()\n"
+                "sys.stdout.write('out:' + payload)\n"
+                "sys.stderr.write('err:' + payload)\n"
+                "raise SystemExit(37)\n"
+            ),
+            payload="hello",
+        )
+
+        self.assertEqual(37, completed.returncode, completed.stderr)
+        self.assertEqual("out:hello", completed.stdout)
+        self.assertEqual("err:hello", completed.stderr)
+
+    @unittest.skipUnless(
+        os.name == "nt" and sys.version_info[:2] == (3, 12),
+        "Windows Python 3.12 launcher runtime test",
+    )
+    def test_windows_launcher_preserves_protocol_under_powershell7(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell 7 is unavailable")
+        completed, _ = self.run_windows_launcher_fixture(
+            manifest_text=None,
+            configure_runtime=True,
+            launcher_shell=pwsh,
+            hook_source=(
+                "import sys\n"
+                "payload = sys.stdin.read()\n"
+                "sys.stdout.write('out:' + payload)\n"
+                "sys.stderr.write('err:' + payload)\n"
+                "raise SystemExit(37)\n"
+            ),
+            payload="hello",
+        )
+
+        self.assertEqual(37, completed.returncode, completed.stderr)
+        self.assertEqual("out:hello", completed.stdout)
+        self.assertEqual("err:hello", completed.stderr)
+
+    @unittest.skipUnless(
+        os.name == "nt" and sys.version_info[:2] == (3, 12),
+        "Windows Python 3.12 launcher runtime test",
+    )
+    def test_windows_launcher_rejects_a_reparse_point_in_runtime_path(self) -> None:
+        def replace_runtime_version_with_junction(plugin_data: Path) -> None:
+            manifest = json.loads(
+                (plugin_data / "runtime.json").read_text(encoding="utf-8")
+            )
+            version_directory = Path(manifest["interpreter"]).parents[1]
+            junction_target = (
+                Path(self.temp.name) / f"moved runtime {version_directory.name}"
+            )
+            shutil.move(version_directory, junction_target)
+            comspec = os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")
+            linked = subprocess.run(
+                [
+                    comspec,
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(version_directory),
+                    str(junction_target),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, linked.returncode, linked.stdout + linked.stderr)
+
+        for shell_name, launcher_shell in self.windows_launcher_shells():
+            with self.subTest(shell=shell_name):
+                completed, _ = self.run_windows_launcher_fixture(
+                    manifest_text=None,
+                    configure_runtime=True,
+                    before_launch=replace_runtime_version_with_junction,
+                    launcher_shell=launcher_shell,
+                )
+                self.assertEqual(126, completed.returncode, completed.stderr)
+                self.assertIn("runtime manifest is invalid", completed.stderr)
+
+    @unittest.skipUnless(
+        os.name == "nt" and sys.version_info[:2] == (3, 12),
+        "Windows Python 3.12 launcher runtime test",
+    )
+    def test_windows_launcher_rejects_a_reparse_point_at_scripts(self) -> None:
+        def replace_scripts_with_junction(plugin_data: Path) -> None:
+            manifest = json.loads(
+                (plugin_data / "runtime.json").read_text(encoding="utf-8")
+            )
+            scripts_directory = Path(manifest["interpreter"]).parent
+            junction_target = (
+                Path(self.temp.name)
+                / f"moved scripts {scripts_directory.parent.name}"
+            )
+            shutil.move(scripts_directory, junction_target)
+            comspec = os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")
+            linked = subprocess.run(
+                [
+                    comspec,
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(scripts_directory),
+                    str(junction_target),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, linked.returncode, linked.stdout + linked.stderr)
+
+        for shell_name, launcher_shell in self.windows_launcher_shells():
+            with self.subTest(shell=shell_name):
+                completed, _ = self.run_windows_launcher_fixture(
+                    manifest_text=None,
+                    configure_runtime=True,
+                    before_launch=replace_scripts_with_junction,
+                    launcher_shell=launcher_shell,
+                )
+                self.assertEqual(126, completed.returncode, completed.stderr)
+                self.assertIn("runtime manifest is invalid", completed.stderr)
+
+    @unittest.skipUnless(
+        os.name == "nt" and sys.version_info[:2] == (3, 12),
+        "Windows Python 3.12 launcher runtime test",
+    )
+    def test_windows_launcher_maps_an_invalid_configured_executable_to_126(self) -> None:
+        def replace_interpreter(plugin_data: Path) -> None:
+            manifest = json.loads(
+                (plugin_data / "runtime.json").read_text(encoding="utf-8")
+            )
+            system32 = Path(os.environ["SystemRoot"]) / "System32"
+            shutil.copyfile(system32 / "where.exe", manifest["interpreter"])
+
+        completed, _ = self.run_windows_launcher_fixture(
+            manifest_text=None,
+            configure_runtime=True,
+            before_launch=replace_interpreter,
+        )
+
+        self.assertEqual(126, completed.returncode, completed.stderr)
+        self.assertIn("configured runtime", completed.stderr)
+
+    @unittest.skipUnless(
+        os.name == "nt" and sys.version_info[:2] == (3, 12),
+        "Windows Python 3.12 launcher runtime test",
+    )
+    def test_windows_launcher_preserves_reserved_hook_exit_codes(self) -> None:
+        for exit_code in (126, 127):
+            with self.subTest(exit_code=exit_code):
+                completed, _ = self.run_windows_launcher_fixture(
+                    manifest_text=None,
+                    configure_runtime=True,
+                    hook_source=(
+                        "import sys\n"
+                        f"sys.stderr.write('hook-{exit_code}')\n"
+                        f"raise SystemExit({exit_code})\n"
+                    ),
+                )
+                self.assertEqual(exit_code, completed.returncode, completed.stderr)
+                self.assertEqual(f"hook-{exit_code}", completed.stderr)
+
+    @unittest.skipUnless(
+        os.name == "nt" and sys.version_info[:2] == (3, 12),
+        "Windows Python 3.12 launcher runtime test",
+    )
+    def test_windows_launcher_preserves_an_unhandled_hook_exception(self) -> None:
+        completed, _ = self.run_windows_launcher_fixture(
+            manifest_text=None,
+            configure_runtime=True,
+            hook_source="raise RuntimeError('hook-boom')\n",
+        )
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertIn("RuntimeError: hook-boom", completed.stderr)
+        self.assertNotIn("hook execution failed", completed.stderr)
+
+    @unittest.skipUnless(
+        os.name == "nt" and sys.version_info[:2] != (3, 12),
+        "Windows non-3.12 launcher version test",
+    )
+    def test_windows_launcher_rejects_a_real_non312_runtime_before_hook(self) -> None:
+        versions_root = (
+            Path.home()
+            / ".codex"
+            / "runtimes"
+            / "codex-control-plane-hooks"
+            / "versions"
+        )
+        versions_root.mkdir(parents=True, exist_ok=True)
+        runtime_id = "py312-" + os.urandom(8).hex()
+        version_directory = versions_root / runtime_id
+        created = subprocess.run(
+            [sys.executable, "-I", "-S", "-m", "venv", str(version_directory)],
+            text=True,
+            capture_output=True,
+            timeout=90,
+            check=False,
+        )
+        self.assertEqual(0, created.returncode, created.stderr)
+        ownership_token = os.urandom(16).hex()
+        ownership_marker = version_directory / ".codex-test-owner"
+        ownership_marker.write_text(ownership_token, encoding="ascii")
+        self.addCleanup(
+            self.cleanup_owned_runtime_version,
+            version_directory,
+            ownership_marker,
+            ownership_token,
+        )
+        interpreter = version_directory / "Scripts" / "python.exe"
+        manifest = json.dumps(
+            {
+                "schema_version": 1,
+                "interpreter": str(interpreter),
+                "python_version": "3.12.0",
+                "runtime_root": str(versions_root.parent),
+                "configured_at": "2026-07-28T00:00:00.0000000Z",
+            }
+        )
+        hook_marker = Path(self.temp.name) / "hook-ran"
+        completed, _ = self.run_windows_launcher_fixture(
+            manifest_text=manifest,
+            hook_source=f"from pathlib import Path\nPath({str(hook_marker)!r}).touch()\n",
+        )
+
+        self.assertEqual(126, completed.returncode, completed.stderr)
+        self.assertFalse(hook_marker.exists())
+        self.assertIn("Python 3.12", completed.stderr)
 
     def test_malformed_present_policy_fails_closed(self) -> None:
         Path(self.data_dir, "policy.json").write_text("{", encoding="utf-8")

@@ -9,17 +9,21 @@ On macOS and Linux, the Hook resolves policy in this order:
 
 On Windows, `PLUGIN_DATA` is required and policy must remain at `PLUGIN_DATA/policy.json`. External policy paths fail closed because this dependency-free Hook cannot independently validate arbitrary NTFS DACLs. If the default policy does not exist, organization-specific detection and all natural-language approvals remain disabled.
 
-## Windows runtime setup
+## Windows 运行时准备
 
-The manifest-driven Windows launcher uses `PLUGIN_DATA/runtime.json`, created by `scripts/setup_runtime.ps1`. Setup requires an absolute Python 3.12 interpreter and never downloads Python:
+Windows 启动器只使用 `scripts/setup_runtime.ps1` 创建的 `PLUGIN_DATA/runtime.json`。准备脚本要求 Python 3.12 解释器的绝对路径，而且不会下载 Python：
 
 ```powershell
-.\setup_runtime.ps1 -PythonPath "C:\absolute\path\to\python.exe"
+.\scripts\setup_runtime.ps1 -PythonPath "C:\absolute\path\to\python.exe"
 ```
 
-Plugin data is selected in this order: absolute `-PluginDataPath`, absolute host `PLUGIN_DATA`, then a unique plugin-name candidate under absolute `-CodexHome` or the Windows user profile's default `.codex` directory. Paths outside `plugins\data`, relative paths, zero or multiple candidates, and observed reparse points fail closed.
+该仓库根级脚本只转发到插件发布目录中的规范实现，避免维护两份安全敏感的 runtime setup 逻辑。安装插件后，仍使用插件目录内的 `scripts/setup_runtime.ps1`。
 
-Runtime versions live below `%USERPROFILE%\.codex\runtimes\codex-control-plane-hooks\versions`. Setup creates and smokes a staging venv before atomically publishing `runtime.json`; a failed run leaves the previous manifest usable. Re-running setup is idempotent. Old versions remain by default. `-PruneOldRuntime -Keep N` requires `N >= 2`, protects the current version, and skips active or uninspectable candidates. The venv depends on its base Python 3.12 installation and is not a self-contained distribution.
+插件数据目录按以下顺序选择：绝对 `-PluginDataPath`、宿主提供的绝对 `PLUGIN_DATA`，最后是在绝对 `-CodexHome` 或 Windows 用户 Profile 默认 `.codex` 目录下的唯一插件候选。位于 `plugins\data` 之外的路径、相对路径、零个或多个候选以及观察到的 reparse point 都会关闭失败。
+
+运行时版本位于 `%USERPROFILE%\.codex\runtimes\codex-control-plane-hooks\versions`。脚本先创建并冒烟验证 staging venv，再原子发布 `runtime.json`；失败不会破坏原有清单。重复执行是幂等的。默认保留旧版本；`-PruneOldRuntime -Keep N` 要求 `N >= 2`，保护当前版本，并跳过正在使用或无法检查的候选。venv 依赖基础 Python 3.12 安装，不是自包含发行版。
+
+启动器不读取 `PATH`，也不调用 `where.exe`、`py.exe` 或其他 Python 发现机制。它严格校验清单 schema、UTF-8、字段、Windows Profile API 返回的固定根目录、解释器布局和 reparse point，并在一个 `python.exe -I -S -c` 子进程中验证 Python 3.12 后执行 Hook。缺少 `PLUGIN_DATA` 或 `runtime.json` 返回 `127`；其余配置、信任、启动或版本错误返回 `126`；Hook 自身退出码原样返回。
 
 ## Policy fields
 
@@ -38,7 +42,7 @@ The policy file is capped at 64 KiB. Each string list is capped at 100 entries. 
 `enable_scoped_git_transactions` never enables approval parsing on its own. Both it and `enable_natural_language_approvals` must be `true`. A transaction binds each exact command it can parse for `add`, `commit`, and `push`, along with repository scope, branch, remote target, and the unique canonical `origin` push-URL identity. A single existing repository may infer its target from exactly one safe canonical `origin`; multi-repository transactions still require explicit source-to-target mappings. Safety exclusions outside the positive authorization capsule constrain the transaction without cancelling its listed commands. Exact push fallback requires literal `origin`, one safe branch, a bounded option subset, and one configured HTTPS/SSH/SCP push URL. Helper, local, insecure, bulk, recursive, multi-ref, custom receive-pack, unresolved scope override, multi-scope, and multi-target forms fail closed.
 The same opt-in also permits an unfinished publication transaction to continue across turns when the new prompt contains a fresh approval anchor and explicitly references the previously authorized Git, GitHub, or publication transaction. The continuation keeps the original session, authorization cwd, issue time, 30-minute TTL, repository mappings, operation set, reservations, and consumed-operation ledger. Operations reserve at `PreToolUse`, remain valid through a matching `PermissionRequest`, and consume only after a matching `PostToolUse`. Exactly one immutable `tool_use_id` reservation may be in flight. A transaction runner permission also requires its matching unclaimed private ticket; an altered runner-shaped retry revokes the transaction. For `push`, that ticket pins the single safe URL plus the resolved local branch, commit OID, object format, and object database. The runner revalidates that source binding, then executes an immutable OID refspec from a private bare repository whose config contains only a frozen system/global credential-and-HTTP snapshot with URL rewrites removed; workspace-local config and hooks are not loaded. Requested upstream metadata is written only after remote success and a fresh `origin` revalidation. A remote success is consumed even when that later local write fails, preventing an accidental retry of an already completed push. The URL is omitted from session state and receipts. The host `Stop` event retains an unfinished transaction or pending transaction reservation. Generic continuation, replay, expiry, completed grants, pending single-command grants, and scope, target, remote, branch, visibility, or force-mode drift fail closed. Repository-local identity correction and strict `git commit --amend --no-edit --reset-author` remain exact current-turn one-shot commands.
 
-On Windows, scoped transaction command rewriting uses a PowerShell contract. The default native route plus explicit `powershell(.exe)` and `pwsh(.exe)` overrides are accepted. Explicit `cmd(.exe)`, Bash, and `sh` overrides are rejected before any transaction reservation is created. Python discovery runs through a bounded `where.exe` child restricted to explicit `PATH` entries under the same five-second deadline as compatibility probes and process-tree cleanup, including slow or unreachable entries. Ordinary commands outside the scoped transaction runner retain their existing shell behavior.
+On Windows, scoped transaction command rewriting uses a PowerShell contract. The default native route plus explicit `powershell(.exe)` and `pwsh(.exe)` overrides are accepted. Explicit `cmd(.exe)`, Bash, and `sh` overrides are rejected before any transaction reservation is created. Hook 启动器使用上文所述固定清单运行时，不再进行 Python 发现。Ordinary commands outside the scoped transaction runner retain their existing shell behavior.
 
 `enable_constrained_github_clone` admits the documented read-only shallow form and an explicitly preauthorized full GitHub HTTPS clone. Both require a direct trusted Git executable, a new absolute destination under the active workspace, an exact local execution tool, a non-empty tool-use identifier, default execution options, and successful provenance reservation. The full form keeps network and mutation risk codes and runs only when its exact command hash is authorized. Later checkout mutations must also appear as exact commands in the same capsule or receive a separate exact grant. Native Codex sandbox and network policy remain authoritative.
 

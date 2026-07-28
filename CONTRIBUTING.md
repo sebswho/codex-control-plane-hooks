@@ -14,6 +14,15 @@ ruff check --no-cache .
 
 Use `python` instead of `python3` on Windows PowerShell. Use Ruff `0.15.12` for the release gate. Pull requests must pass the lint, Ubuntu, macOS, Windows, and full-history secret-scan jobs.
 
+Windows 本地冒烟必须使用 Python 3.12，并先准备固定运行时：
+
+```powershell
+.\scripts\setup_runtime.ps1 `
+  -PythonPath (Resolve-Path .\.venv\Scripts\python.exe)
+python .\scripts\smoke_hook_manifest.py --windows-shell powershell
+python .\scripts\smoke_hook_manifest.py --windows-shell pwsh
+```
+
 Run the Codex-bundled plugin validator when available:
 
 ```bash
