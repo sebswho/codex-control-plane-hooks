@@ -14,8 +14,10 @@ On Windows, `PLUGIN_DATA` is required and policy must remain at `PLUGIN_DATA/pol
 Windows 启动器只使用 `scripts/setup_runtime.ps1` 创建的 `PLUGIN_DATA/runtime.json`。准备脚本要求 Python 3.12 解释器的绝对路径，而且不会下载 Python：
 
 ```powershell
-.\setup_runtime.ps1 -PythonPath "C:\absolute\path\to\python.exe"
+.\scripts\setup_runtime.ps1 -PythonPath "C:\absolute\path\to\python.exe"
 ```
+
+该仓库根级脚本只转发到插件发布目录中的规范实现，避免维护两份安全敏感的 runtime setup 逻辑。安装插件后，仍使用插件目录内的 `scripts/setup_runtime.ps1`。
 
 插件数据目录按以下顺序选择：绝对 `-PluginDataPath`、宿主提供的绝对 `PLUGIN_DATA`，最后是在绝对 `-CodexHome` 或 Windows 用户 Profile 默认 `.codex` 目录下的唯一插件候选。位于 `plugins\data` 之外的路径、相对路径、零个或多个候选以及观察到的 reparse point 都会关闭失败。
 

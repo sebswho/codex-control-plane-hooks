@@ -17,7 +17,7 @@ Use `python` instead of `python3` on Windows PowerShell. Use Ruff `0.15.12` for 
 Windows 本地冒烟必须使用 Python 3.12，并先准备固定运行时：
 
 ```powershell
-.\plugins\codex-control-plane-hooks\scripts\setup_runtime.ps1 `
+.\scripts\setup_runtime.ps1 `
   -PythonPath (Resolve-Path .\.venv\Scripts\python.exe)
 python .\scripts\smoke_hook_manifest.py --windows-shell powershell
 python .\scripts\smoke_hook_manifest.py --windows-shell pwsh

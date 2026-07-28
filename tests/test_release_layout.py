@@ -241,6 +241,17 @@ class ReleaseLayoutTests(unittest.TestCase):
         self.assertIn("-PluginDataPath", manifest_smoke)
         self.assertNotIn("versions_before", manifest_smoke)
 
+    def test_top_level_runtime_setup_delegates_to_packaged_script(self) -> None:
+        wrapper = (ROOT / "scripts" / "setup_runtime.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            r"plugins\codex-control-plane-hooks\scripts\setup_runtime.ps1",
+            wrapper,
+        )
+        self.assertIn("& $packagedScript @args", wrapper)
+        self.assertNotIn("function Initialize-NativeMethods", wrapper)
+
     def test_manifest_covers_nested_exec_and_posttool_reads(self) -> None:
         hooks = json.loads(
             (ROOT / "plugins" / "codex-control-plane-hooks" / "hooks" / "hooks.json").read_text(encoding="utf-8")

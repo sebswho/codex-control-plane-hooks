@@ -5,6 +5,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 ## [Unreleased]
 
 - 新增显式 Windows Python 3.12 运行时准备：确定性发现插件数据目录、staging venv 冒烟、原子发布 `runtime.json`、幂等复用、拒绝 reparse point，并提供保护当前、保留、活动或无法检查版本的可选清理。
+- 新增受版本控制的仓库根级 `scripts/setup_runtime.ps1` 开发入口；它只转发到插件发布目录中的规范实现，避免重复维护安全逻辑。
 - Windows 启动器现在只信任 `PLUGIN_DATA/runtime.json` 和 Windows Profile API 固定根目录，不再探测或回退到 `PATH`。启动器严格校验清单和路径，在单个 Python 3.12 子进程中验证版本并执行 Hook，继承标准流并透传 Hook 退出码；缺少配置返回 `127`，其他配置、信任、启动或版本错误返回 `126`。
 
 ## [0.2.6] - 2026-07-23

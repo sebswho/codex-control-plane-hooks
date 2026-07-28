@@ -144,9 +144,11 @@ codex plugin marketplace upgrade codex-control-plane-hooks
 Windows 启动器只读取 `PLUGIN_DATA/runtime.json`，不会再从 `PATH`、`py.exe` 或 `python.exe` 猜测解释器。首次使用前必须运行一次 Python 3.12 运行时准备脚本。脚本不会下载 Python，也不会安装第三方包；请传入现有 Python 3.12 解释器的绝对路径：
 
 ```powershell
-.\plugins\codex-control-plane-hooks\scripts\setup_runtime.ps1 `
+.\scripts\setup_runtime.ps1 `
   -PythonPath "C:\absolute\path\to\python.exe"
 ```
+
+仓库根目录的脚本是受版本控制的开发入口，只负责转发参数；插件发布目录中的同名脚本仍是唯一实现和安装后入口。
 
 脚本优先使用宿主提供的 `PLUGIN_DATA`，也可以在 `%USERPROFILE%\.codex\plugins\data` 下发现唯一匹配目录。发现结果不唯一时，请显式传入绝对 `-PluginDataPath` 或 `-CodexHome`；脚本不会猜测。
 
