@@ -153,6 +153,34 @@ exit $LASTEXITCODE
                     b'{"systemMessage":"trusted package"}\n', completed.stdout
                 )
 
+    def test_legacy_entrypoint_can_bootstrap_the_sibling_package(self) -> None:
+        entrypoint = self.packaged_scripts / "control_plane_hook.py"
+        entrypoint.write_text(
+            """from pathlib import Path
+import runpy
+
+bootstrap_path = Path(__file__).parent / "control_plane" / "bootstrap.py"
+configure_package = runpy.run_path(str(bootstrap_path))["configure_package"]
+configure_package(__file__)
+
+from control_plane.policy import PolicyView
+
+print(PolicyView().enable_scoped_git_transactions)
+""",
+            encoding="utf-8",
+        )
+
+        completed = subprocess.run(
+            [sys.executable, "-I", "-S", str(entrypoint)],
+            cwd=self.root,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual(b"False\n", completed.stdout.replace(b"\r\n", b"\n"))
+        self.assertEqual(b"", completed.stderr)
+
     def test_unknown_expected_event_is_blocked_without_calling_handler(self) -> None:
         entrypoint = self.make_recording_entrypoint("UnexpectedEvent")
         marker = self.root / "handler-called"
@@ -405,6 +433,41 @@ raise SystemExit(run_hook("UserPromptSubmit", handler))
             completed.stderr.replace(b"\r\n", b"\n"),
         )
         self.assertFalse(marker.exists())
+
+    def test_nonregular_store_target_fails_before_module_import(self) -> None:
+        entrypoint = self.make_recording_entrypoint("UserPromptSubmit")
+
+        for module_name in ("policy.py", "state.py"):
+            with self.subTest(module_name=module_name):
+                module_target = (
+                    self.packaged_scripts / "control_plane" / module_name
+                )
+                original = module_target.read_bytes()
+                module_target.unlink()
+                module_target.mkdir()
+                marker = self.root / f"handler-called-with-invalid-{module_name}"
+                environment = os.environ.copy()
+                environment["HANDLER_MARKER"] = str(marker)
+
+                completed = subprocess.run(
+                    [sys.executable, "-I", "-S", str(entrypoint)],
+                    cwd=self.root,
+                    env=environment,
+                    input=b'{"hook_event_name":"UserPromptSubmit"}',
+                    capture_output=True,
+                    check=False,
+                )
+
+                self.assertEqual(126, completed.returncode)
+                self.assertEqual(b"", completed.stdout)
+                self.assertEqual(
+                    b"codex-control-plane-hooks: package bootstrap failed\n",
+                    completed.stderr.replace(b"\r\n", b"\n"),
+                )
+                self.assertFalse(marker.exists())
+
+                module_target.rmdir()
+                module_target.write_bytes(original)
 
     def test_reparse_package_is_rejected_before_handler_import(self) -> None:
         entrypoint = self.make_recording_entrypoint("UserPromptSubmit")
