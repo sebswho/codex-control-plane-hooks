@@ -1,6 +1,6 @@
 # 安全 bootstrap 与 Hook protocol
 
-状态：待批准
+状态：已批准并实施（2026-07-29，待 PR/CI）
 实施分支：从当时最新 `main` 创建 `feature/core-bootstrap-protocol`
 行为基线：v0.2.6
 依赖：`../../runtime-isolation/proposal.md`
@@ -27,8 +27,8 @@
 
 ## TDD 与批准门
 
-- [ ] 先写 `-I -S`、仓库外 cwd、毒化 cwd/`PYTHONPATH` 与同名 package 失败测试。
-- [ ] 先写 protocol malformed/错配 contract，再实现最小 Module。
-- [ ] PowerShell 5.1/7 与 POSIX package smoke 通过。
+- [x] 先写 `-I -S`、仓库外 cwd、毒化 cwd/`PYTHONPATH` 与同名 package 失败测试。
+- [x] 先写 protocol malformed/错配 contract，再实现最小 Module。
+- [ ] PowerShell 5.1/7 与 POSIX package smoke 通过（本地 Windows 双 shell 已通过，POSIX 待 CI）。
 
-本提案批准且 runtime isolation 合并后方可实施。
+批准门已满足：本提案已获批准，runtime isolation 已合并。
