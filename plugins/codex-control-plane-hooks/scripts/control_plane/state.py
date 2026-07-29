@@ -42,7 +42,7 @@ def mutate_session(session_id: str, mutator: _SessionMutator) -> _SessionSnapsho
 
     path = _state_path(session_id)
     lock_path = path.with_suffix(".lock")
-    with _open_private(lock_path, os.O_RDWR | os.O_CREAT) as lock:
+    with _open_private(lock_path, os.O_RDWR | os.O_CREAT, binary=True) as lock:
         lock_backend = _lock_state(lock)
         try:
             state = _load(path, session_id)
@@ -66,7 +66,7 @@ def cleanup_session(
 
     path = _state_path(session_id)
     lock_path = path.with_suffix(".lock")
-    with _open_private(lock_path, os.O_RDWR | os.O_CREAT) as lock:
+    with _open_private(lock_path, os.O_RDWR | os.O_CREAT, binary=True) as lock:
         lock_backend = _lock_state(lock)
         try:
             state = _load(path, session_id)
@@ -167,7 +167,9 @@ def _load(path: Path, session_id: str) -> _SessionSnapshot:
     return normalized
 
 
-def _open_private(path: Path, flags: int, mode: int = 0o600):
+def _open_private(
+    path: Path, flags: int, mode: int = 0o600, *, binary: bool = False
+):
     if path.exists() and path.is_symlink():
         raise RuntimeError(f"refusing symlinked state file: {path}")
     nofollow = getattr(os, "O_NOFOLLOW", 0)
@@ -183,6 +185,9 @@ def _open_private(path: Path, flags: int, mode: int = 0o600):
     if os.name != "nt":
         os.fchmod(descriptor, mode)
     writable = bool(flags & (os.O_WRONLY | os.O_RDWR))
+    if binary:
+        stream_mode = "r+b" if writable else "rb"
+        return os.fdopen(descriptor, stream_mode, buffering=0)
     stream_mode = "r+" if writable else "r"
     return os.fdopen(descriptor, stream_mode, encoding="utf-8")
 
@@ -200,11 +205,18 @@ def _lock_state(stream) -> str:
                 time.sleep(0.05)
     if msvcrt is None:
         raise RuntimeError("no supported state-lock backend is available")
-    stream.seek(0, os.SEEK_END)
-    if stream.tell() == 0:
-        stream.write("0")
-        stream.flush()
-        os.fsync(stream.fileno())
+    while True:
+        stream.seek(0, os.SEEK_END)
+        if stream.tell() > 0:
+            break
+        try:
+            stream.write(b"0")
+            os.fsync(stream.fileno())
+            break
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("timed out initializing the Windows state lock")
+            time.sleep(0.05)
     while True:
         stream.seek(0)
         try:

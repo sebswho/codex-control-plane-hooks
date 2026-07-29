@@ -11,6 +11,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - unavailable on macOS/Linux.
+    msvcrt = None
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "plugins" / "codex-control-plane-hooks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -96,6 +101,41 @@ class StateStoreTests(unittest.TestCase):
             list(executor.map(lambda _: increment(), range(workers)))
 
         self.assertEqual(8, read_session("session-concurrent")["compaction_count"])
+
+    @unittest.skipIf(msvcrt is None, "Windows byte-range lock test")
+    def test_zero_length_lock_sentinel_waits_for_initialization_contention(self) -> None:
+        session_id = "session-lock-initialization"
+        mutate_session(session_id, lambda state: None)
+        lock_path = next(self.data_dir.glob("session-*.lock"))
+        outcome: list[dict | Exception] = []
+
+        def mutate() -> None:
+            try:
+                outcome.append(
+                    mutate_session(
+                        session_id,
+                        lambda state: state.__setitem__("explicit_expand", True),
+                    )
+                )
+            except Exception as exc:
+                outcome.append(exc)
+
+        with lock_path.open("r+b", buffering=0) as holder:
+            holder.truncate(0)
+            holder.seek(0)
+            msvcrt.locking(holder.fileno(), msvcrt.LK_NBLCK, 1)
+            worker = threading.Thread(target=mutate)
+            worker.start()
+            time.sleep(0.2)
+            holder.seek(0)
+            msvcrt.locking(holder.fileno(), msvcrt.LK_UNLCK, 1)
+            worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(1, len(outcome))
+        if isinstance(outcome[0], Exception):
+            raise outcome[0]
+        self.assertTrue(outcome[0]["explicit_expand"])
 
     def test_failed_atomic_replace_preserves_existing_state(self) -> None:
         mutate_session("session-atomic", lambda state: None)
