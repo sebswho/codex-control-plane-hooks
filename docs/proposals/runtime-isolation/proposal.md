@@ -58,9 +58,9 @@ Windows 正式运行时固定在：
 ```json
 {
   "schema_version": 1,
-  "interpreter": "C:\\Users\\name\\.codex\\runtimes\\codex-control-plane-hooks\\versions\\<runtime-id>\\Scripts\\python.exe",
+  "interpreter": "C:\\Profile\\.codex\\runtimes\\codex-control-plane-hooks\\versions\\<runtime-id>\\Scripts\\python.exe",
   "python_version": "3.12.x",
-  "runtime_root": "C:\\Users\\name\\.codex\\runtimes\\codex-control-plane-hooks",
+  "runtime_root": "C:\\Profile\\.codex\\runtimes\\codex-control-plane-hooks",
   "configured_at": "RFC-3339 UTC timestamp"
 }
 ```
