@@ -2,7 +2,7 @@
 
 状态：已完成（2026-07-30，PR #5 已合并）
 实施分支：从当时最新 `main` 创建 `feature/core-policy-state`
-行为基线：v0.2.6
+行为基线：上游 v0.2.8 `b6f86a49d8f2adca146d8eb99d0847b465e543d6` + 本地 parity merge `3b5fa54598a80d1fbed6683ff3d48b71e0146cb5`
 依赖：`../bootstrap-protocol/proposal.md`
 
 ## 动机与目标

@@ -18,7 +18,7 @@ Ticket 04 同时触及 bootstrap、protocol、policy、state、handler 与 entry
 
 ## 共同约束
 
-- 响应 JSON、policy/state schema、退出行为与 v0.2.6 行为基线不变。
+- 响应 JSON、policy/state schema、退出行为与上游 v0.2.8 `b6f86a49d8f2adca146d8eb99d0847b465e543d6` + 本地 parity merge `3b5fa54598a80d1fbed6683ff3d48b71e0146cb5` 行为基线不变。
 - 新旧入口的 contract 同时比较响应和 plugin-data 前后状态；新入口不得调用旧字符串 `dispatch()`。
 - 每个子提案从当时最新 `main` 建独立 feature 分支并创建独立 PR。
 - 本地 Hook 不新增网络日志、指标或 tracing；只使用既有 fail-closed stderr/退出码和测试 artifacts，避免泄露 payload 与个人路径。
