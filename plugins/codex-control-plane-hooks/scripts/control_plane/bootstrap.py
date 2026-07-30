@@ -44,18 +44,24 @@ def _validated_scripts_root(entrypoint_file: str) -> Path:
         raise BootstrapError("Entrypoint path must be absolute.")
 
     entrypoint = Path(os.path.abspath(str(entrypoint)))
-    entrypoints_dir = entrypoint.parent
-    package_dir = entrypoints_dir.parent
-    scripts_root = package_dir.parent
-
-    if entrypoints_dir.name != "entrypoints" or package_dir.name != "control_plane":
-        raise BootstrapError("Entrypoint is outside the fixed package layout.")
+    if entrypoint.name == "control_plane_hook.py":
+        scripts_root = entrypoint.parent
+        package_dir = scripts_root / "control_plane"
+        entrypoints_dir = package_dir / "entrypoints"
+    else:
+        entrypoints_dir = entrypoint.parent
+        package_dir = entrypoints_dir.parent
+        scripts_root = package_dir.parent
+        if entrypoints_dir.name != "entrypoints" or package_dir.name != "control_plane":
+            raise BootstrapError("Entrypoint is outside the fixed package layout.")
 
     _require_directory(scripts_root, "scripts root")
     _require_directory(package_dir, "control_plane package")
     _require_directory(entrypoints_dir, "entrypoints package")
     _require_regular_file(package_dir / "__init__.py", "control_plane package marker")
+    _require_regular_file(package_dir / "policy.py", "policy module")
     _require_regular_file(package_dir / "protocol.py", "protocol module")
+    _require_regular_file(package_dir / "state.py", "state module")
     _require_regular_file(
         entrypoints_dir / "__init__.py", "entrypoints package marker"
     )

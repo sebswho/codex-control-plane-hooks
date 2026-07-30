@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib
 import json
 import ntpath
 import os
 import re
+import runpy
 import shlex
 import shutil
 import stat
@@ -16,25 +18,20 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlsplit
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - unavailable on native Windows.
-    fcntl = None
-
-try:
-    import msvcrt
-except ImportError:  # pragma: no cover - unavailable on macOS/Linux.
-    msvcrt = None
+_BOOTSTRAP_PATH = Path(__file__).parent / "control_plane" / "bootstrap.py"
+_configure_package = runpy.run_path(str(_BOOTSTRAP_PATH))["configure_package"]
+_configure_package(__file__)
+policy_store = importlib.import_module("control_plane.policy")
+state_store = importlib.import_module("control_plane.state")
 
 
 MAX_SCAN_CHARS = 500_000
 MAX_POLICY_BYTES = 64_000
-STATE_SCHEMA_VERSION = 4
-STATE_TTL_SECONDS = 7 * 24 * 60 * 60
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 _PYTHON_SOURCE_SUFFIXES = {".py", ".pyi"}
 _LOCAL_SOURCE_READ_EXECUTABLES = {"nl", "rg", "sed"}
@@ -1852,75 +1849,8 @@ def _configure_runner_data_dir(value: str) -> None:
     os.environ["PLUGIN_DATA"] = str(path)
 
 
-def _policy_path() -> Path:
-    configured = os.environ.get("CONTROL_PLANE_POLICY")
-    if configured and os.name == "nt":
-        raise RuntimeError("Windows policy must use PLUGIN_DATA/policy.json")
-    return _absolute_configured_path(configured, "CONTROL_PLANE_POLICY") if configured else _data_dir() / "policy.json"
-
-
-def _policy_values(raw: Any, key: str) -> list[str]:
-    values = raw.get(key, []) if isinstance(raw, dict) else []
-    if not isinstance(values, list):
-        return []
-    return [str(item).strip() for item in values[:100] if isinstance(item, str) and item.strip()]
-
-
-def _empty_policy() -> dict[str, Any]:
-    return {
-        "markers": [],
-        "terms": [],
-        "durable_markers": [],
-        "enable_natural_language_approvals": False,
-        "enable_sensitive_disclosure_approvals": False,
-        "enable_scoped_git_transactions": False,
-        "enable_constrained_github_clone": False,
-    }
-
-
-def _policy() -> dict[str, Any]:
-    path = _policy_path()
-    explicitly_configured = bool(os.environ.get("CONTROL_PLANE_POLICY"))
-    try:
-        info = os.stat(path, follow_symlinks=False)
-    except FileNotFoundError:
-        if explicitly_configured:
-            raise RuntimeError("configured policy file is unavailable")
-        return _empty_policy()
-    if path.is_symlink() or _is_reparse_info(info) or not stat.S_ISREG(info.st_mode):
-        raise RuntimeError("policy path must be a regular non-symlink file")
-    if info.st_size > MAX_POLICY_BYTES:
-        raise RuntimeError("policy file exceeds the size limit")
-    if os.name != "nt" and hasattr(os, "getuid") and info.st_uid != os.getuid():
-        raise PermissionError("policy file is owned by another user")
-    if explicitly_configured and os.name != "nt" and info.st_mode & 0o077:
-        raise PermissionError("external policy file must not be accessible by group or others")
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError) as exc:
-        raise RuntimeError("policy file is invalid") from exc
-    if not isinstance(raw, dict):
-        raise RuntimeError("policy file must contain a JSON object")
-    return {
-        "markers": _policy_values(raw, "sensitive_markers"),
-        "terms": _policy_values(raw, "sensitive_terms"),
-        "durable_markers": _policy_values(raw, "durable_destination_markers"),
-        "enable_natural_language_approvals": raw.get("enable_natural_language_approvals") is True,
-        "enable_sensitive_disclosure_approvals": raw.get("enable_sensitive_disclosure_approvals") is True,
-        "enable_scoped_git_transactions": raw.get("enable_scoped_git_transactions") is True,
-        "enable_constrained_github_clone": raw.get("enable_constrained_github_clone") is True,
-    }
-
-
-def _matches_policy_values(text: str, values: list[str]) -> bool:
+def _matches_policy_values(text: str, values: Sequence[str]) -> bool:
     return any(re.search(re.escape(value), text, re.IGNORECASE) for value in values)
-
-
-def _state_path(session_id: str) -> Path:
-    if not session_id.strip():
-        raise ValueError("session_id is required")
-    digest = hashlib.sha256(session_id.encode("utf-8", errors="replace")).hexdigest()[:24]
-    return _data_dir() / f"session-{digest}.json"
 
 
 def _session_id(event: dict[str, Any]) -> str:
@@ -1948,192 +1878,6 @@ def _open_private(path: Path, flags: int, mode: int = 0o600):
     writable = bool(flags & (os.O_WRONLY | os.O_RDWR))
     stream_mode = "r+" if writable else "r"
     return os.fdopen(descriptor, stream_mode, encoding="utf-8")
-
-
-def _lock_state(stream) -> str:
-    deadline = time.monotonic() + 5.0
-    if fcntl is not None:
-        while True:
-            try:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return "fcntl"
-            except (BlockingIOError, OSError):
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("timed out acquiring the POSIX state lock")
-                time.sleep(0.05)
-    if msvcrt is None:
-        raise RuntimeError("no supported state-lock backend is available")
-    stream.seek(0, os.SEEK_END)
-    if stream.tell() == 0:
-        stream.write("0")
-        stream.flush()
-        os.fsync(stream.fileno())
-    while True:
-        stream.seek(0)
-        try:
-            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-            return "msvcrt"
-        except OSError:
-            if time.monotonic() >= deadline:
-                raise TimeoutError("timed out acquiring the Windows state lock")
-            time.sleep(0.05)
-
-
-def _unlock_state(stream, backend: str) -> None:
-    if backend == "fcntl":
-        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
-        return
-    if backend == "msvcrt":
-        stream.seek(0)
-        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-        return
-    raise RuntimeError(f"unknown state-lock backend: {backend}")
-
-
-def _load_state_file(path: Path, session_id: str) -> dict[str, Any]:
-    try:
-        with _open_private(path, os.O_RDONLY) as stream:
-            raw = stream.read()
-    except FileNotFoundError:
-        return _default_state(session_id)
-
-    try:
-        state = json.loads(raw)
-    except (ValueError, TypeError) as exc:
-        raise RuntimeError("state file contains invalid JSON") from exc
-    if not isinstance(state, dict):
-        raise RuntimeError("state file must contain a JSON object")
-    schema_version = state.get("schema_version")
-    updated_at = state.get("updated_at")
-    if (
-        not isinstance(schema_version, int)
-        or isinstance(schema_version, bool)
-        or not isinstance(updated_at, int)
-        or isinstance(updated_at, bool)
-    ):
-        raise RuntimeError("state file metadata is invalid")
-    if schema_version not in {1, 2, 3, STATE_SCHEMA_VERSION}:
-        raise RuntimeError("state file schema is unsupported")
-    if updated_at <= 0:
-        raise RuntimeError("state file timestamp is invalid")
-    if int(time.time()) - updated_at > STATE_TTL_SECONDS:
-        return _default_state(session_id)
-    _validate_state_fields(state)
-    normalized = _default_state(session_id)
-    for key in normalized:
-        if key in state:
-            normalized[key] = state[key]
-    normalized["schema_version"] = STATE_SCHEMA_VERSION
-    normalized["session_hash"] = _default_state(session_id)["session_hash"]
-    return normalized
-
-
-def _validate_state_fields(state: dict[str, Any]) -> None:
-    scalar_types = {
-        "session_hash": str,
-        "current_turn_id": str,
-        "explicit_expand": bool,
-        "nested_allowed": bool,
-        "sensitive_context": bool,
-    }
-    for key, expected_type in scalar_types.items():
-        if key in state and type(state[key]) is not expected_type:
-            raise RuntimeError(f"state field has invalid type: {key}")
-
-    active_agents = state.get("active_agents", {})
-    if not isinstance(active_agents, dict) or not all(
-        isinstance(agent_id, str) and isinstance(metadata, dict)
-        for agent_id, metadata in active_agents.items()
-    ):
-        raise RuntimeError("state field has invalid type: active_agents")
-
-    dangerous_authorizations = state.get("dangerous_authorizations", [])
-    if not isinstance(dangerous_authorizations, list) or not all(
-        isinstance(item, str) for item in dangerous_authorizations
-    ):
-        raise RuntimeError("state field has invalid type: dangerous_authorizations")
-
-    dangerous_hashes = state.get("dangerous_authorization_hashes", {})
-    if not isinstance(dangerous_hashes, dict) or not all(
-        isinstance(code, str)
-        and isinstance(digests, list)
-        and all(isinstance(digest, str) for digest in digests)
-        for code, digests in dangerous_hashes.items()
-    ):
-        raise RuntimeError("state field has invalid type: dangerous_authorization_hashes")
-
-    pending_permissions = state.get("pending_permission_authorizations", {})
-    if not isinstance(pending_permissions, dict) or not all(
-        isinstance(tool_id, str) and isinstance(metadata, dict)
-        for tool_id, metadata in pending_permissions.items()
-    ):
-        raise RuntimeError("state field has invalid type: pending_permission_authorizations")
-
-    for key in ("pending_constrained_clones", "untrusted_clone_roots"):
-        records = state.get(key, {})
-        if not isinstance(records, dict) or not all(
-            isinstance(record_id, str) and isinstance(metadata, dict)
-            for record_id, metadata in records.items()
-        ):
-            raise RuntimeError(f"state field has invalid type: {key}")
-
-    for key in ("sensitive_disclosure_grant", "local_git_grant", "pending_local_git"):
-        if key in state and state[key] is not None and not isinstance(state[key], dict):
-            raise RuntimeError(f"state field has invalid type: {key}")
-
-    compaction_count = state.get("compaction_count", 0)
-    if not isinstance(compaction_count, int) or isinstance(compaction_count, bool) or compaction_count < 0:
-        raise RuntimeError("state field has invalid type: compaction_count")
-
-
-def _default_state(session_id: str) -> dict[str, Any]:
-    return {
-        "schema_version": STATE_SCHEMA_VERSION,
-        "session_hash": hashlib.sha256(session_id.encode("utf-8", errors="replace")).hexdigest()[:16],
-        "current_turn_id": "",
-        "active_agents": {},
-        "explicit_expand": False,
-        "nested_allowed": False,
-        "sensitive_context": False,
-        "sensitive_disclosure_grant": None,
-        "dangerous_authorizations": [],
-        "dangerous_authorization_hashes": {},
-        "pending_permission_authorizations": {},
-        "local_git_grant": None,
-        "pending_local_git": None,
-        "pending_constrained_clones": {},
-        "untrusted_clone_roots": {},
-        "compaction_count": 0,
-        "updated_at": int(time.time()),
-    }
-
-
-def _mutate_state(session_id: str, mutate: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
-    path = _state_path(session_id)
-    lock_path = path.with_suffix(".lock")
-    with _open_private(lock_path, os.O_RDWR | os.O_CREAT) as lock:
-        lock_backend = _lock_state(lock)
-        try:
-            state = _load_state_file(path, session_id)
-            mutate(state)
-            state["schema_version"] = STATE_SCHEMA_VERSION
-            state["updated_at"] = int(time.time())
-            temp = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-            try:
-                with _open_private(temp, os.O_RDWR | os.O_CREAT | os.O_EXCL) as stream:
-                    stream.write(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temp, path)
-            finally:
-                _unlink_owned_regular(temp)
-            return state
-        finally:
-            _unlock_state(lock, lock_backend)
-
-
-def _read_state(session_id: str) -> dict[str, Any]:
-    return _mutate_state(session_id, lambda state: None)
 
 
 def _unlink_owned_regular(candidate: Path) -> None:
@@ -2357,7 +2101,7 @@ def _prepare_git_runner(
     effective_cwd: str,
 ) -> str:
     _cleanup_stale_git_runner_records()
-    state = _read_state(session_id)
+    state = state_store.read_session(session_id)
     pending = state.get("pending_permission_authorizations")
     permission = pending.get(tool_use_id) if isinstance(pending, dict) else None
     if not isinstance(permission, dict) or not permission.get("transaction_id"):
@@ -2491,7 +2235,7 @@ def _prepare_git_runner(
         )
 
     try:
-        _mutate_state(session_id, bind_runner)
+        state_store.mutate_session(session_id, bind_runner)
     except Exception:
         _unlink_owned_regular(request_path)
         raise
@@ -2538,7 +2282,7 @@ def _revoke_git_transaction(session_id: str, transaction_id: str) -> None:
     if not session_id or not transaction_id:
         return
     try:
-        _mutate_state(
+        state_store.mutate_session(
             session_id,
             lambda state: _clear_git_transaction_state(state, transaction_id),
         )
@@ -3052,7 +2796,7 @@ def _claim_git_runner_request(
             raise RuntimeError("Git runner state claim failed")
         permission["runner_claimed_at"] = time.time()
 
-    _mutate_state(session_id, claim)
+    state_store.mutate_session(session_id, claim)
 
 
 def _run_approved_git(token: str) -> int:
@@ -3213,28 +2957,25 @@ def _consume_git_runner_status(permission: dict[str, Any]) -> str:
 
 
 def _stop_state(session_id: str) -> int:
-    path = _state_path(session_id)
-    lock_path = path.with_suffix(".lock")
-    with _open_private(lock_path, os.O_RDWR | os.O_CREAT) as lock:
-        lock_backend = _lock_state(lock)
-        try:
-            state = _load_state_file(path, session_id)
-            active_count = len(state.get("active_agents") or {})
-            resumable_git = _git_grant_usable(
-                state.get("local_git_grant"),
-                str(state.get("session_hash") or ""),
-            ) or _pending_git_usable(state.get("pending_local_git"))
-            pending_permissions = state.get("pending_permission_authorizations")
-            if isinstance(pending_permissions, dict):
-                resumable_git = resumable_git or any(
-                    isinstance(item, dict) and item.get("transaction_id")
-                    for item in pending_permissions.values()
-                )
-            if not active_count and not resumable_git:
-                _unlink_owned_regular(path)
-            return active_count
-        finally:
-            _unlock_state(lock, lock_backend)
+    active_count = 0
+
+    def remove_if_inactive(state: dict[str, Any]) -> bool:
+        nonlocal active_count
+        active_count = len(state.get("active_agents") or {})
+        resumable_git = _git_grant_usable(
+            state.get("local_git_grant"),
+            str(state.get("session_hash") or ""),
+        ) or _pending_git_usable(state.get("pending_local_git"))
+        pending_permissions = state.get("pending_permission_authorizations")
+        if isinstance(pending_permissions, dict):
+            resumable_git = resumable_git or any(
+                isinstance(item, dict) and item.get("transaction_id")
+                for item in pending_permissions.values()
+            )
+        return not active_count and not resumable_git
+
+    state_store.cleanup_session(session_id, remove_if_inactive)
+    return active_count
 
 
 def _flatten_text(value: Any, *, limit: int = MAX_SCAN_CHARS) -> str:
@@ -4693,10 +4434,10 @@ def _local_git_grant_from_prompt(
     pending: dict[str, Any] | None,
     session_id: str = "",
 ) -> dict[str, Any] | None:
-    policy = _policy()
+    policy = policy_store.load_policy()
     if not (
-        policy["enable_natural_language_approvals"]
-        and policy["enable_scoped_git_transactions"]
+        policy.enable_natural_language_approvals
+        and policy.enable_scoped_git_transactions
     ):
         return None
     authorization_text = _git_authorization_text(prompt)
@@ -4843,11 +4584,11 @@ def _local_git_grant_from_prompt(
 
 
 def _git_transaction_resume_requested(prompt: str) -> bool:
-    policy = _policy()
+    policy = policy_store.load_policy()
     authorization_text = _git_authorization_text(prompt)
     return bool(
-        policy["enable_natural_language_approvals"]
-        and policy["enable_scoped_git_transactions"]
+        policy.enable_natural_language_approvals
+        and policy.enable_scoped_git_transactions
         and authorization_text
         and _AUTHORIZED_TRANSACTION_CONTINUATION_RE.search(authorization_text)
         and not _AUTHORIZATION_REVOCATION_RE.search(prompt)
@@ -5330,9 +5071,9 @@ def _dangerous_authorization_hashes(
     *,
     skip_scoped_candidates: bool = False,
 ) -> dict[str, list[str]]:
-    policy = _policy()
+    policy = policy_store.load_policy()
     if (
-        not policy["enable_natural_language_approvals"]
+        not policy.enable_natural_language_approvals
         or _AUTHORIZATION_REVOCATION_RE.search(prompt)
     ):
         return {}
@@ -5352,7 +5093,7 @@ def _dangerous_authorization_hashes(
                 dangerous.add("downloaded_code_execution")
             if (
                 skip_scoped_candidates
-                and policy["enable_scoped_git_transactions"]
+                and policy.enable_scoped_git_transactions
                 and _transaction_operation_from_command(candidate, cwd)
             ):
                 continue
@@ -5374,12 +5115,12 @@ def _nested_allowed(prompt: str) -> bool:
 
 
 def _sensitive_context(text: str) -> bool:
-    policy = _policy()
+    policy = policy_store.load_policy()
     return bool(
-        policy["markers"]
-        and policy["terms"]
-        and _matches_policy_values(text, policy["markers"])
-        and _matches_policy_values(text, policy["terms"])
+        policy.markers
+        and policy.terms
+        and _matches_policy_values(text, policy.markers)
+        and _matches_policy_values(text, policy.terms)
     )
 
 
@@ -5387,7 +5128,7 @@ def _bounded_term_source(term: str) -> str:
     return rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])"
 
 
-def _configured_term_pattern(terms: list[str]) -> re.Pattern[str] | None:
+def _configured_term_pattern(terms: Sequence[str]) -> re.Pattern[str] | None:
     alternatives = "|".join(
         re.escape(term)
         for term in sorted(set(terms), key=lambda item: (-len(item), item.casefold()))
@@ -5401,7 +5142,7 @@ def _configured_term_pattern(terms: list[str]) -> re.Pattern[str] | None:
 
 
 def _matching_concrete_term_hashes(text: str) -> set[str]:
-    pattern = _configured_term_pattern(_policy()["terms"])
+    pattern = _configured_term_pattern(policy_store.load_policy().terms)
     if pattern is None:
         return set()
     concrete: set[str] = set()
@@ -5535,7 +5276,7 @@ def _policy_value_hash(value: str) -> str:
 
 def _matching_grant_term_hashes(text: str) -> set[str]:
     matched: set[str] = set()
-    for term in _policy()["terms"]:
+    for term in policy_store.load_policy().terms:
         mentions = list(re.finditer(_bounded_term_source(term), text, re.IGNORECASE))
         if not mentions:
             continue
@@ -5550,11 +5291,11 @@ def _matching_grant_term_hashes(text: str) -> set[str]:
 
 
 def _sensitive_disclosure_grant(prompt: str, turn_id: str) -> dict[str, Any] | None:
-    policy = _policy()
+    policy = policy_store.load_policy()
     if (
-        not policy["enable_sensitive_disclosure_approvals"]
-        or not policy["markers"]
-        or not policy["terms"]
+        not policy.enable_sensitive_disclosure_approvals
+        or not policy.markers
+        or not policy.terms
         or not turn_id
     ):
         return None
@@ -5571,7 +5312,7 @@ def _sensitive_disclosure_grant(prompt: str, turn_id: str) -> dict[str, Any] | N
         if all(
             (
                 _SENSITIVE_EXPLICIT_AUTH_RE.search(item),
-                _matches_policy_values(item, policy["markers"]),
+                _matches_policy_values(item, policy.markers),
                 term_hashes,
                 _SENSITIVE_EXTERNAL_VERB_RE.search(item),
                 len(targets) == 1,
@@ -5783,7 +5524,7 @@ def _is_external_tool(tool_name: str, text: str) -> bool:
 def _is_durable_destination(text: str) -> bool:
     return bool(
         _DURABLE_DESTINATION_RE.search(text)
-        or _matches_policy_values(text, _policy()["durable_markers"])
+        or _matches_policy_values(text, policy_store.load_policy().durable_markers)
     )
 
 
@@ -5920,7 +5661,7 @@ def _handle_user_prompt(event: dict[str, Any]) -> dict[str, Any]:
         ):
             state["pending_local_git"] = None
 
-    _mutate_state(session_id, mutate)
+    state_store.mutate_session(session_id, mutate)
 
     if sensitive:
         return _context(
@@ -5967,10 +5708,10 @@ def _handle_tool_gate(event: dict[str, Any]) -> dict[str, Any]:
     event_cwd = base_event_cwd
     if isinstance(tool_input, dict) and tool_input.get("workdir"):
         event_cwd = str(tool_input["workdir"])
-    state_snapshot = _read_state(session_id)
-    policy = _policy()
-    clone_enabled = policy["enable_constrained_github_clone"]
-    transaction_enabled = policy["enable_scoped_git_transactions"]
+    state_snapshot = state_store.read_session(session_id)
+    policy = policy_store.load_policy()
+    clone_enabled = policy.enable_constrained_github_clone
+    transaction_enabled = policy.enable_scoped_git_transactions
     execution_options_digest = _execution_options_digest(tool_name, tool_input)
     command_digest = _command_hash(command or text, event_cwd)
     runner_permission = _matching_git_runner_permission(
@@ -6122,7 +5863,7 @@ def _handle_tool_gate(event: dict[str, Any]) -> dict[str, Any]:
                     state, tool_use_id, clone_reservation
                 )
 
-            state_snapshot = _mutate_state(session_id, reserve_clone)
+            state_snapshot = state_store.mutate_session(session_id, reserve_clone)
         else:
             pending_clones = state_snapshot.get("pending_constrained_clones")
             reservation_result["ready"] = bool(
@@ -6334,7 +6075,7 @@ def _handle_tool_gate(event: dict[str, Any]) -> dict[str, Any]:
             if isinstance(pending, dict) and pending.get("digest") == scoped_operation.get("digest"):
                 state["pending_local_git"] = None
 
-    state = _mutate_state(session_id, mutate_authorization)
+    state = state_store.mutate_session(session_id, mutate_authorization)
     unauthorized = authorization_result["unauthorized"]
     if unauthorized:
         if "downloaded_code_execution" in unauthorized:
@@ -6404,7 +6145,7 @@ def _handle_tool_gate(event: dict[str, Any]) -> dict[str, Any]:
             if current.get("sensitive_disclosure_grant") == grant:
                 current["sensitive_disclosure_grant"] = None
 
-        state = _mutate_state(session_id, consume_disclosure)
+        state = state_store.mutate_session(session_id, consume_disclosure)
 
     if event_name == "PermissionRequest" and authorization_result["permission_accepted"]:
         return _allow_permission()
@@ -6495,7 +6236,7 @@ def _handle_post_tool(event: dict[str, Any]) -> dict[str, Any]:
         event_cwd = str(tool_input["workdir"])
     digest = _command_hash(command, event_cwd) if command else ""
     execution_options_digest = _execution_options_digest(tool_name, tool_input)
-    clone_enabled = _policy()["enable_constrained_github_clone"]
+    clone_enabled = policy_store.load_policy().enable_constrained_github_clone
     tool_status = _tool_response_status(event.get("tool_response"))
 
     def clear_pending(state: dict[str, Any]) -> None:
@@ -6598,7 +6339,7 @@ def _handle_post_tool(event: dict[str, Any]) -> dict[str, Any]:
         }
         state["untrusted_clone_roots"] = roots
 
-    state = _mutate_state(session_id, clear_pending)
+    state = state_store.mutate_session(session_id, clear_pending)
     response_text = _flatten_sensitive_fields(event.get("tool_response"))
     findings = _scan_tool_output(event, response_text, source=f"PostToolUse:{tool_name}")
     if _secret_found(findings):
@@ -6634,7 +6375,7 @@ def _handle_subagent_start(event: dict[str, Any]) -> dict[str, Any]:
         active = state.setdefault("active_agents", {})
         active[agent_id] = {"agent_type": agent_type, "started_at": int(time.time())}
 
-    state = _mutate_state(session_id, mutate)
+    state = state_store.mutate_session(session_id, mutate)
     nested = bool(state.get("nested_allowed"))
     if nested:
         message = "Nested delegation is authorized for this turn. Stay within the parent's explicit child budget."
@@ -6650,7 +6391,7 @@ def _handle_subagent_stop(event: dict[str, Any]) -> dict[str, Any]:
     def mutate(state: dict[str, Any]) -> None:
         state.setdefault("active_agents", {}).pop(agent_id, None)
 
-    _mutate_state(session_id, mutate)
+    state_store.mutate_session(session_id, mutate)
     return {}
 
 
@@ -6660,7 +6401,7 @@ def _handle_precompact(event: dict[str, Any]) -> dict[str, Any]:
     def mutate(state: dict[str, Any]) -> None:
         state["compaction_count"] = int(state.get("compaction_count", 0)) + 1
 
-    state = _mutate_state(session_id, mutate)
+    state = state_store.mutate_session(session_id, mutate)
     active_count = len(state.get("active_agents") or {})
     if not active_count:
         return {}

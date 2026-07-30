@@ -23,6 +23,8 @@ sys.path.insert(0, str(SCRIPTS))
 SCRIPT = SCRIPTS / "control_plane_hook.py"
 DEFAULT_CWD = tempfile.gettempdir()
 
+from control_plane import state as state_store  # noqa: E402
+
 
 class HookProtocolTests(unittest.TestCase):
     @staticmethod
@@ -382,7 +384,7 @@ class HookProtocolTests(unittest.TestCase):
                 else None
             )
 
-        module._mutate_state(self.session, complete_probe)
+        state_store.mutate_session(self.session, complete_probe)
         if runner_id:
             module._unlink_owned_regular(
                 Path(self.data_dir) / f".git-runner-request-{runner_id}.json"
@@ -919,28 +921,32 @@ class HookProtocolTests(unittest.TestCase):
         self.assertIn("race-agent", state["active_agents"])
 
     def test_state_lock_timeout_fails_closed(self) -> None:
-        module = __import__("control_plane_hook")
         fake_fcntl = mock.Mock()
         fake_fcntl.LOCK_EX = 1
         fake_fcntl.LOCK_NB = 2
         fake_fcntl.flock.side_effect = BlockingIOError
-        stream = mock.Mock()
-        stream.fileno.return_value = 9
-        with mock.patch.object(module, "fcntl", fake_fcntl), mock.patch.object(
-            module.time, "monotonic", side_effect=[0.0, 6.0]
+        with mock.patch.object(state_store, "fcntl", fake_fcntl), mock.patch.object(
+            state_store.time, "monotonic", side_effect=[0.0, 6.0]
         ):
             with self.assertRaises(TimeoutError):
-                module._lock_state(stream)
+                state_store.read_session(self.session)
 
     def test_failed_atomic_state_replace_preserves_existing_state(self) -> None:
-        module = __import__("control_plane_hook")
         self.prompt("Inspect the project.")
-        state_path = module._state_path(self.session)
+        digest = hashlib.sha256(self.session.encode("utf-8")).hexdigest()[:24]
+        state_path = Path(self.data_dir) / f"session-{digest}.json"
         original = state_path.read_bytes()
 
-        with mock.patch.object(module.os, "replace", side_effect=OSError("simulated replace failure")):
+        with mock.patch.object(
+            state_store.os,
+            "replace",
+            side_effect=OSError("simulated replace failure"),
+        ):
             with self.assertRaises(OSError):
-                module._mutate_state(self.session, lambda state: state.__setitem__("explicit_expand", True))
+                state_store.mutate_session(
+                    self.session,
+                    lambda state: state.__setitem__("explicit_expand", True),
+                )
 
         self.assertEqual(original, state_path.read_bytes())
         self.assertEqual([], list(Path(self.data_dir).glob(".*.tmp")))
