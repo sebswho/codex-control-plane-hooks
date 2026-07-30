@@ -1679,8 +1679,7 @@ def _fallback_scan_text(text: str) -> list[dict[str, str]]:
     ]
 
 
-def _scan_text(text: str, *, source: str) -> list[dict[str, str]]:
-    del source
+def _scan_text(text: str) -> list[dict[str, str]]:
     return _fallback_scan_text(text)
 
 
@@ -3711,7 +3710,7 @@ def _context(event_name: str, message: str, *, system_message: str | None = None
 def handle_user_prompt_submit(event: dict[str, Any]) -> dict[str, Any]:
     prompt = str(event.get("prompt") or "")
     cwd = str(event.get("cwd") or ".")
-    if _secret_found(_scan_text(prompt, source="user_prompt")):
+    if _secret_found(_scan_text(prompt)):
         return {
             "decision": "block",
             "reason": "Potential credential detected in the prompt. Redact it before sending.",

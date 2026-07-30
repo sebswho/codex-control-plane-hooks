@@ -63,17 +63,15 @@ GENERIC_PRIVATE_PATTERNS = (
         ),
     ),
 )
+_CREDENTIAL_ASSIGNMENT_DETAIL_RE = re.compile(
+    r"(?i)\b(?P<label>api[_-]?key|token|secret|password|client[_-]?secret|access[_-]?key)"
+    r"\s*(?P<separator>[:=])\s*(?P<quote>['\"]?)(?P<value>[A-Za-z0-9_./+=:-]{16,})"
+)
 SECRET_PATTERNS = (
     ("openai-key", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b")),
     ("bearer-token", re.compile(r"(?i)\bAuthorization\s*:\s*Bearer\s+[A-Za-z0-9._~+/=-]{16,}")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
-    (
-        "credential-assignment",
-        re.compile(
-            r"(?i)\b(api[_-]?key|token|secret|password|client[_-]?secret|access[_-]?key)"
-            r"\s*[:=]\s*['\"]?[A-Za-z0-9_./+=:-]{16,}"
-        ),
-    ),
+    ("credential-assignment", _CREDENTIAL_ASSIGNMENT_DETAIL_RE),
     ("github-pat", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b")),
     ("github-token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")),
     ("slack-token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b")),
@@ -88,6 +86,62 @@ def _inside(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _python_callable_name(node: ast.expr) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _python_callable_name(node.value)
+        return f"{parent}.{node.attr}" if parent else ""
+    return ""
+
+
+def _credential_assignment_is_code_call(text: str, match: re.Match[str]) -> bool:
+    detail = _CREDENTIAL_ASSIGNMENT_DETAIL_RE.search(match.group(0))
+    if (
+        not detail
+        or detail.group("separator") != "="
+        or detail.group("quote")
+        or not detail.group("label").islower()
+    ):
+        return False
+    value = detail.group("value")
+    callable_identifier = re.fullmatch(
+        r"_?[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?:\._?[a-z][a-z0-9]*(?:_[a-z0-9]+)+)*",
+        value,
+    )
+    if not callable_identifier or not re.match(r"[ \t]*\(", text[match.end() : match.end() + 16]):
+        return False
+    line_end = text.find("\n", match.end())
+    source_line = text[match.start() : len(text) if line_end < 0 else line_end].strip()
+    try:
+        parsed = ast.parse(source_line)
+    except SyntaxError:
+        return False
+    for statement in parsed.body:
+        if not isinstance(statement, ast.Assign) or not isinstance(statement.value, ast.Call):
+            continue
+        if any(
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, (str, bytes))
+            and len(node.value) >= 16
+            for node in ast.walk(statement.value)
+        ):
+            continue
+        targets = [target.id for target in statement.targets if isinstance(target, ast.Name)]
+        if detail.group("label") in targets and _python_callable_name(statement.value.func) == value:
+            return True
+    return False
+
+
+def _secret_pattern_found(
+    path: Path, text: str, rule_id: str, pattern: re.Pattern[str]
+) -> bool:
+    matches = pattern.finditer(text)
+    if rule_id != "credential-assignment" or path.suffix.lower() != ".py":
+        return next(matches, None) is not None
+    return any(not _credential_assignment_is_code_call(text, match) for match in matches)
 
 
 def _walk_release_entries(root: Path) -> list[Path]:
@@ -321,7 +375,7 @@ def _scan_release_data(
         if pattern.search(text):
             errors.append(f"private marker {rule_id} in {display}")
     for rule_id, pattern in SECRET_PATTERNS:
-        if pattern.search(text):
+        if _secret_pattern_found(relative, text, rule_id, pattern):
             errors.append(f"credential-like literal {rule_id} in {display}")
     if relative.suffix == ".py":
         try:
@@ -416,12 +470,29 @@ def _validate_metadata(errors: list[str]) -> None:
                     posix_command = handler.get("command")
                     if not isinstance(posix_command, str) or "$PLUGIN_ROOT" not in posix_command:
                         errors.append(f"{event_name} command hook lacks a PLUGIN_ROOT-based POSIX command")
+                    elif not posix_command.startswith("python3 -I -S "):
+                        errors.append(f"{event_name} command hook must use python3 -I -S")
                     windows_command = handler.get("commandWindows")
                     if not isinstance(windows_command, str) or "$env:PLUGIN_ROOT" not in windows_command:
                         errors.append(f"{event_name} command hook lacks a PLUGIN_ROOT-based commandWindows")
                     timeout = handler.get("timeout")
                     if not isinstance(timeout, int) or timeout <= 5 or timeout > 10:
                         errors.append(f"{event_name} command hook timeout must be between 6 and 10 seconds")
+
+    hook_source = (PLUGIN / "scripts" / "control_plane_hook.py").read_text(encoding="utf-8")
+    try:
+        hook_tree = ast.parse(hook_source)
+    except SyntaxError as exc:
+        errors.append(f"invalid Hook façade syntax: {exc}")
+    else:
+        string_constants = {
+            node.value
+            for node in ast.walk(hook_tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        for required_cli in ("--run-approved-git", "--cleanup-orphans"):
+            if required_cli not in string_constants:
+                errors.append(f"Hook façade lacks required CLI compatibility token: {required_cli}")
 
     rules = (ROOT / "examples" / "rules" / "default.rules").read_text(encoding="utf-8")
     if any(line.lstrip().startswith("prefix_rule(") for line in rules.splitlines()):

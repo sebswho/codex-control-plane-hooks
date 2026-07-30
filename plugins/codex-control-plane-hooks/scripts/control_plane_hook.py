@@ -545,11 +545,11 @@ def _credential_assignment_is_code_call(
     return False
 
 
-def _scan_tool_output(event: dict[str, Any], text: str, *, source: str) -> list[dict[str, str]]:
+def _scan_tool_output(event: dict[str, Any], text: str) -> list[dict[str, str]]:
     """Suppress generic assignment noise only for AST-proven local Python call sites."""
     source_path = _local_python_source_read_path(event)
     if source_path is None:
-        return _scan_text(text, source=source)
+        return _scan_text(text)
     generic_pattern = dict(_SECRET_PATTERNS)["credential_assignment"]
 
     def mask_code_call(match: re.Match[str]) -> str:
@@ -561,7 +561,7 @@ def _scan_tool_output(event: dict[str, Any], text: str, *, source: str) -> list[
         start, end = detail.span("label")
         return match.group(0)[:start] + (" " * (end - start)) + match.group(0)[end:]
 
-    return _scan_text(generic_pattern.sub(mask_code_call, text), source=source)
+    return _scan_text(generic_pattern.sub(mask_code_call, text))
 
 
 def _fallback_scan_command(command: str) -> list[dict[str, str]]:
@@ -570,8 +570,7 @@ def _fallback_scan_command(command: str) -> list[dict[str, str]]:
     return _dedupe_findings(findings)
 
 
-def _scan_command(command: str, *, source: str) -> list[dict[str, str]]:
-    del source
+def _scan_command(command: str) -> list[dict[str, str]]:
     return _fallback_scan_command(command)
 
 
@@ -2458,15 +2457,15 @@ def _handle_tool_gate(event: dict[str, Any]) -> dict[str, Any]:
     if isinstance(tool_input, dict) and _tool_family(tool_name) in {"bash", "exec_command"}:
         command = str(tool_input.get("command") or tool_input.get("cmd") or "")
     findings = (
-        _scan_command(command, source=f"{event_name}:{tool_name}")
+        _scan_command(command)
         if command
-        else _scan_text(text, source=f"{event_name}:{tool_name}")
+        else _scan_text(text)
     )
     removed_text, persisted_text = _local_redaction_surfaces(tool_name, tool_input)
     secret_redaction = bool(
         removed_text
-        and _secret_found(_scan_text(removed_text, source=f"{event_name}:{tool_name}:removed"))
-        and not _secret_found(_scan_text(persisted_text, source=f"{event_name}:{tool_name}:persisted"))
+        and _secret_found(_scan_text(removed_text))
+        and not _secret_found(_scan_text(persisted_text))
     )
 
     if _secret_found(findings) and not secret_redaction:
@@ -3058,7 +3057,7 @@ def _handle_post_tool(event: dict[str, Any]) -> dict[str, Any]:
 
     state = state_store.mutate_session(session_id, clear_pending)
     response_text = _flatten_sensitive_fields(event.get("tool_response"))
-    findings = _scan_tool_output(event, response_text, source=f"PostToolUse:{tool_name}")
+    findings = _scan_tool_output(event, response_text)
     if _secret_found(findings):
         return {
             "decision": "block",
