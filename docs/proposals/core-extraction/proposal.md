@@ -1,6 +1,6 @@
 # Core extraction proposal 套件索引
 
-状态：已拆分，等待各实施子提案批准
+状态：实施完成，等待最终子提案 PR/CI（2026-07-30）
 依赖：`../runtime-isolation/proposal.md`
 对应票据：Ticket 04
 
@@ -10,9 +10,9 @@ Ticket 04 同时触及 bootstrap、protocol、policy、state、handler 与 entry
 
 ## 实施子提案
 
-1. [安全 bootstrap 与 protocol](bootstrap-protocol/proposal.md)：固定 package root、isolated-mode 启动和通用 Hook protocol。
-2. [Policy 与 state 基础 Interface](policy-state/proposal.md)：封装 policy view、session state、锁与原子替换。
-3. [UserPromptSubmit tracer bullet](user-prompt-entrypoint/proposal.md)：用独立 handler/entrypoint 验证前两项 Interface。
+1. [安全 bootstrap 与 protocol](bootstrap-protocol/proposal.md)：已由 PR #4 合并，固定 package root、isolated-mode 启动和通用 Hook protocol。
+2. [Policy 与 state 基础 Interface](policy-state/proposal.md)：已由 PR #5 合并，封装 policy view、session state、锁与原子替换。
+3. [UserPromptSubmit tracer bullet](user-prompt-entrypoint/proposal.md)：已实施，等待独立 PR/CI 验证。
 
 依赖顺序：runtime isolation → bootstrap/protocol → policy/state → UserPromptSubmit。三个子提案均完成后 Ticket 04 才完成。
 
