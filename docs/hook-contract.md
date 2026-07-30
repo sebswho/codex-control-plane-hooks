@@ -1,5 +1,7 @@
 # Hook Contract
 
+The audited upstream behavior baseline is recorded in [upstream-v0.2.8-parity.md](upstream-v0.2.8-parity.md).
+
 ## Events
 
 The plugin declares handlers for:
@@ -27,6 +29,9 @@ Each command handler declares a POSIX `command` and a PowerShell `commandWindows
 - Unknown event names return an empty response because the plugin has no declared policy for them.
 - Hook timeout behavior belongs to the host and must be verified for each supported Codex version.
 - Windows 缺少 `PLUGIN_DATA` 或 `runtime.json` 时返回 `127`；清单、固定路径、reparse point、启动或 Python 版本无效时返回 `126`；Hook 自身退出码原样返回。
+
+- Each dispatched event opens one shared six-second decision deadline. Classification-time Git children and state-lock waits draw from that budget, and an exhausted budget is treated as an unestablished answer, so the affected check fails closed. Ordinary Hook dispatch never starts a cleanup process. Approved-Git runner startup detaches the best-effort cleanup worker before its deliberate security rechecks, which remain outside the event decision deadline. A user-scoped lock in the system temporary directory establishes nonblocking single-flight before plugin-data validation, and a persisted cursor advances the active window across stable directory listings. Each run admits at most 64 directory candidates into that window, attempts at most two directory removals, caps each removal child at 500 ms, and applies a one-second cleanup deadline after candidate enumeration yields control. Portable Python APIs cannot preempt a blocked filesystem enumeration, so arbitrary-backlog traversal time and eventual cleanup are not hard guarantees. Live runner leases continue to protect active artifacts. The deadline and event-local Git read cache are cleared on both normal and exceptional dispatch exits.
+- Repeated remote and config reads within one event are answered once. Reads that exist to detect drift, including every runner-side revalidation, are never served from that cache.
 
 ## Approval binding
 

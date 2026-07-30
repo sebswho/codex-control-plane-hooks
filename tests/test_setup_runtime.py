@@ -112,6 +112,27 @@ class RuntimeSetupTests(unittest.TestCase):
             process.kill()
         process.wait()
 
+    def test_python_below_user_profile_does_not_require_locking_profile_root(self) -> None:
+        self.require_python312()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            try:
+                root.relative_to(Path.home().resolve())
+            except ValueError:
+                self.skipTest("temporary directory is outside the Windows user profile")
+            source_python = self.make_source_runtime(root)
+            plugin_data = self.make_plugin_data(root)
+
+            completed = self.run_setup(source_python, plugin_data=plugin_data)
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            manifest = self.read_manifest(plugin_data)
+            interpreter = Path(str(manifest["interpreter"]))
+            version_directory = interpreter.parents[1]
+            self.assertRegex(version_directory.name, r"^py312-[a-z0-9-]+$")
+            self.assertTrue(interpreter.is_file())
+            self.addCleanup(shutil.rmtree, version_directory, True)
+
     def test_explicit_plugin_data_bootstraps_python312_runtime(self) -> None:
         self.require_empty_versions_root("runtime bootstrap test requires an empty root")
         with tempfile.TemporaryDirectory() as directory:

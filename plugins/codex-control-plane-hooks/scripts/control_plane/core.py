@@ -7,16 +7,20 @@ import importlib
 import json
 import ntpath
 import os
+import posixpath
 import re
 import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+event_context = importlib.import_module("control_plane.event_context")
 
 policy_store = importlib.import_module("control_plane.policy")
 
@@ -143,9 +147,7 @@ _PROMPT_EXTERNAL_TARGET_PATTERNS = (
     ),
     (
         "web",
-        re.compile(
-            r"(?i)(?<![A-Za-z0-9_./-])web(?![A-Za-z0-9_/-]|\.[A-Za-z0-9_])|https?://"
-        ),
+        re.compile(r"(?i)(?<![A-Za-z0-9_./-])web(?![A-Za-z0-9_/-]|\.[A-Za-z0-9_])|https?://"),
     ),
 )
 
@@ -275,9 +277,7 @@ _QUOTED_ABSOLUTE_PATH_RE = re.compile(
     r")(?P=quote)"
 )
 
-_URI_SPAN_RE = re.compile(
-    r"(?i)\b[A-Z][A-Z0-9+.-]*://[^\s，。；;`\"']+"
-)
+_URI_SPAN_RE = re.compile(r"(?i)\b[A-Z][A-Z0-9+.-]*://[^\s，。；;`\"']+")
 
 _CURRENT_REPO_RE = re.compile(r"当前(?:仓库|repo)|这个(?:仓库|repo)|current\s+(?:repository|repo)", re.IGNORECASE)
 
@@ -291,9 +291,7 @@ _GITHUB_CREATE_COMMAND_RE = re.compile(
     r"(?P<target>[A-Za-z0-9][A-Za-z0-9.-]*/[A-Za-z0-9][A-Za-z0-9._-]*)"
 )
 
-_GITHUB_CREATE_INTENT_RE = re.compile(
-    r"(?i)(?:创建|create).{0,240}(?:private\s+(?:repo|repository)|私有仓库)"
-)
+_GITHUB_CREATE_INTENT_RE = re.compile(r"(?i)(?:创建|create).{0,240}(?:private\s+(?:repo|repository)|私有仓库)")
 
 _GITHUB_REPO_NAME_RE = re.compile(r"(?i)\b[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+\b")
 
@@ -334,9 +332,7 @@ _AUTH_GIT_CONTINUATION_RE = re.compile(
     r"(?:继续\s*)?(?:执行|完成|运行|创建|推送|初始化|暂存|提交|git\b|gh\b|push\b|create\b)"
 )
 
-_NEGATED_AUTH_COMMENT_RE = re.compile(
-    r"(?i)^\s*#.*(?:不要|禁止|别|不许|不得|do\s+not|don't|never)"
-)
+_NEGATED_AUTH_COMMENT_RE = re.compile(r"(?i)^\s*#.*(?:不要|禁止|别|不许|不得|do\s+not|don't|never)")
 
 _COMMAND_NEGATION_RE = re.compile(
     r"(?i)(?:不要|别|禁止|不许|不得|无需|不用|do\s+not|don't|never).{0,32}"
@@ -346,6 +342,13 @@ _COMMAND_NEGATION_RE = re.compile(
 _PENDING_GIT_TTL_SECONDS = 600
 
 _SCOPED_GIT_TRANSACTION_TTL_SECONDS = 30 * 60
+
+_EVENT_BUDGET_SECONDS = 6.0
+_GIT_QUERY_TIMEOUT_SECONDS = 3.0
+_STATE_LOCK_TIMEOUT_SECONDS = 5.0
+_EVENT_DEADLINE: float | None = None
+_RUNNER_MODE = False
+_GIT_QUERY_CACHE: dict[tuple[Any, ...], Any] = {}
 
 _ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
 
@@ -508,6 +511,26 @@ _GIT_SCOPE_FLAGS = {"--git-dir", "--work-tree", "--namespace"}
 
 _GIT_NETWORK_SUBCOMMANDS = {"push", "pull", "fetch", "clone"}
 
+_SENSITIVE_HOME_REDIRECTION_TARGETS = frozenset(
+    {
+        ".ssh/authorized_keys",
+        ".gitconfig",
+        ".codex/config.toml",
+        ".codex/AGENTS.md",
+        ".codex/hooks.json",
+    }
+)
+_SENSITIVE_HOME_REDIRECTION_TARGETS_CASEFOLDED = frozenset(
+    target.casefold() for target in _SENSITIVE_HOME_REDIRECTION_TARGETS
+)
+_MACOS_HOME_PREFIX = "/" + "users/"
+_MACOS_HOME_REDIRECTION_RE = re.compile(r"(?i)^" + re.escape(_MACOS_HOME_PREFIX) + r"[^/]+/(?P<relative>.+)$")
+_POSIX_HOME_REDIRECTION_RE = re.compile(r"^(?:~|\$HOME|\$\{HOME\}|/root|/var/root|/" + r"home/[^/]+)/(?P<relative>.+)$")
+_WINDOWS_HOME_REDIRECTION_RE = re.compile(
+    r"(?i)^(?:[A-Z]:/" + r"Users/[^/]+|%USERPROFILE%|\$env:USERPROFILE)/(?P<relative>.+)$"
+)
+_PROFILE_REDIRECTION_OPERATORS = {">", ">>", ">|", "&>", "&>>"}
+
 _EXACT_PUSH_BOOLEAN_OPTIONS = frozenset(
     "--atomic --dry-run --force --force-if-includes --force-with-lease --ipv4 "
     "--ipv6 --no-atomic --no-force-if-includes --no-progress --no-signed "
@@ -517,22 +540,16 @@ _EXACT_PUSH_BOOLEAN_OPTIONS = frozenset(
 
 _EXACT_PUSH_VALUE_OPTIONS = frozenset({"-o", "--push-option"})
 
-_EXACT_PUSH_VALUE_PREFIXES = tuple(
-    option + "=" for option in _EXACT_PUSH_VALUE_OPTIONS if option.startswith("--")
-)
+_EXACT_PUSH_VALUE_PREFIXES = tuple(option + "=" for option in _EXACT_PUSH_VALUE_OPTIONS if option.startswith("--"))
 
 _EXACT_PUSH_OPTIONAL_VALUE_PREFIXES = (
     "--force-with-lease=",
     "--signed=",
 )
 
-_SCOPED_PUSH_OPTIONS = frozenset(
-    {"-u", "--set-upstream", "--porcelain", "-q", "--quiet", "-v", "--verbose"}
-)
+_SCOPED_PUSH_OPTIONS = frozenset({"-u", "--set-upstream", "--porcelain", "-q", "--quiet", "-v", "--verbose"})
 
-_CONSTRAINED_CLONE_BOOLEAN_OPTIONS = frozenset(
-    "--no-checkout --no-tags --progress --quiet --single-branch".split()
-)
+_CONSTRAINED_CLONE_BOOLEAN_OPTIONS = frozenset("--no-checkout --no-tags --progress --quiet --single-branch".split())
 
 _CONSTRAINED_CLONE_SENSITIVE_COMPONENTS = frozenset(
     ".aws|.codex|.config|.git|.gnupg|.kube|.local|.ssh|$recycle.bin|program files|"
@@ -714,12 +731,87 @@ _QUOTED_WINDOWS_EXECUTABLE_RE = re.compile(
     r"[^\"'\r\n]+\.(?:exe|cmd|bat|com|ps1))(?P=quote)"
 )
 
+
 def _finding(code: str, severity: str = "high") -> dict[str, str]:
     return {"severity": severity, "category": "dangerous_command", "code": code}
 
-def _windows_segment_findings(
-    executable: str, args: list[str], *, depth: int = 0
-) -> list[dict[str, str]]:
+
+def _begin_event_budget() -> None:
+    """Open one shared deadline and read cache for a single dispatched event."""
+    global _EVENT_DEADLINE
+    _EVENT_DEADLINE = event_context.begin_budget(_EVENT_BUDGET_SECONDS)
+    _GIT_QUERY_CACHE.clear()
+
+
+def _end_event_budget() -> None:
+    """Discard event-local timing and memoized reads on every dispatch exit."""
+    global _EVENT_DEADLINE
+    _EVENT_DEADLINE = None
+    event_context.end_budget()
+    _GIT_QUERY_CACHE.clear()
+
+
+def _enter_runner_mode() -> None:
+    """The approved-Git child owns its own lifetime and revalidates deliberately."""
+    global _RUNNER_MODE
+    _RUNNER_MODE = True
+    event_context.enter_runner_mode()
+
+
+def _event_budget_active() -> bool:
+    return _EVENT_DEADLINE is not None and not _RUNNER_MODE
+
+
+def _remaining_event_seconds(ceiling: float) -> float:
+    """Clamp one bounded wait to the remaining shared event budget."""
+    if not _event_budget_active():
+        return ceiling
+    return min(ceiling, _EVENT_DEADLINE - time.monotonic())
+
+
+def _run_git_query(
+    command: list[str],
+    *,
+    cwd: str | None = None,
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str] | None:
+    """Run one bounded read-only Git child; None means the answer is unestablished."""
+    timeout = _remaining_event_seconds(_GIT_QUERY_TIMEOUT_SECONDS)
+    if timeout <= 0:
+        return None
+    try:
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            env=environment,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _git_query_cache_key(
+    kind: str,
+    scope: str,
+    selector: str,
+    exact_global_args: list[str] | None,
+    environment: dict[str, str] | None,
+) -> tuple[Any, ...] | None:
+    """Classification reads repeat within one event; deliberate rechecks do not."""
+    if environment is not None or not _event_budget_active():
+        return None
+    return (
+        kind,
+        scope,
+        selector,
+        None if exact_global_args is None else tuple(exact_global_args),
+    )
+
+
+def _windows_segment_findings(executable: str, args: list[str], *, depth: int = 0) -> list[dict[str, str]]:
     findings: list[dict[str, str]] = []
     lowered = [token.casefold() for token in args]
     powershell_delete = executable in {"del", "erase", "rd", "remove-item", "ri", "rm", "rmdir"}
@@ -735,8 +827,7 @@ def _windows_segment_findings(
     if executable == "." and args:
         findings.append(_finding("dynamic_eval", "medium"))
     if executable == "runas" or (
-        executable in {"saps", "start", "start-process"}
-        and _powershell_runas_requested(args)
+        executable in {"saps", "start", "start-process"} and _powershell_runas_requested(args)
     ):
         findings.append(_finding("privilege_escalation", "medium"))
     if executable == "set-executionpolicy":
@@ -753,6 +844,7 @@ def _windows_segment_findings(
         findings.append(_finding("package_install", "medium"))
     return findings
 
+
 def _looks_like_windows_command(command: str) -> bool:
     return bool(
         os.name == "nt"
@@ -764,10 +856,12 @@ def _looks_like_windows_command(command: str) -> bool:
         )
     )
 
+
 def _strip_token_quotes(token: str) -> str:
     if len(token) >= 2 and token[0] == token[-1] and token[0] in {"'", '"'}:
         return token[1:-1]
     return token
+
 
 def _executable_name(token: str) -> str:
     executable = ntpath.basename(_strip_token_quotes(token).replace("/", "\\")).casefold()
@@ -783,22 +877,23 @@ def _executable_name(token: str) -> str:
         return "pip"
     return executable
 
+
 def _trusted_executable_token(token: str, expected: str) -> bool:
     raw = _strip_token_quotes(token)
     if _executable_name(raw) != expected.casefold():
         return False
-    resolved = shutil.which(raw) if not any(separator in raw for separator in ("/", "\\")) else (
-        shutil.which(expected) or (shutil.which(f"{expected}.exe") if os.name == "nt" else None)
+    resolved = (
+        shutil.which(raw)
+        if not any(separator in raw for separator in ("/", "\\"))
+        else (shutil.which(expected) or (shutil.which(f"{expected}.exe") if os.name == "nt" else None))
     )
     if not resolved:
         return False
     if any(separator in raw for separator in ("/", "\\")) and not os.path.isabs(raw):
         return False
     candidate = resolved if not any(separator in raw for separator in ("/", "\\")) else raw
-    return bool(
-        os.path.normcase(os.path.realpath(candidate))
-        == os.path.normcase(os.path.realpath(resolved))
-    )
+    return bool(os.path.normcase(os.path.realpath(candidate)) == os.path.normcase(os.path.realpath(resolved)))
+
 
 def _is_literal_powershell_script_target(token: str) -> bool:
     target = _strip_token_quotes(token)
@@ -807,6 +902,7 @@ def _is_literal_powershell_script_target(token: str) -> bool:
     if target.startswith(("\\\\", "//")) or re.match(r"(?i)^[a-z][a-z0-9+.-]*://", target):
         return False
     return target.casefold().endswith(".ps1")
+
 
 def _is_literal_powershell_call_target(token: str) -> bool:
     target = _strip_token_quotes(token)
@@ -820,6 +916,7 @@ def _is_literal_powershell_call_target(token: str) -> bool:
         return True
     return target.casefold() in _POWERSHELL_READ_ONLY_COMMANDS
 
+
 def _powershell_option(token: str) -> tuple[str, str | None]:
     if len(token) < 2 or token[0] not in {"-", "/"}:
         return "", None
@@ -830,38 +927,32 @@ def _powershell_option(token: str) -> tuple[str, str | None]:
             return name.casefold(), value
     return option.casefold(), None
 
+
 def _powershell_runas_requested(args: list[str]) -> bool:
     for index, token in enumerate(args):
         name, inline_value = _powershell_option(token)
         if name not in {"v", "verb"}:
             continue
-        value = inline_value if inline_value is not None else (
-            args[index + 1] if index + 1 < len(args) else ""
-        )
+        value = inline_value if inline_value is not None else (args[index + 1] if index + 1 < len(args) else "")
         if _strip_token_quotes(value).casefold() == "runas":
             return True
     return False
+
 
 def _powershell_launcher_findings(args: list[str], *, depth: int) -> list[dict[str, str]]:
     findings: list[dict[str, str]] = []
     index = 0
     while index < len(args):
         name, inline_value = _powershell_option(args[index])
-        encoded_option = (
-            bool(name)
-            and (
-                "encodedcommand".startswith(name)
-                or (len(name) >= 2 and "encodedarguments".startswith(name))
-            )
+        encoded_option = bool(name) and (
+            "encodedcommand".startswith(name) or (len(name) >= 2 and "encodedarguments".startswith(name))
         )
         if encoded_option:
             findings.append(_finding("dynamic_eval", "medium"))
             return findings
         if name == "ep" or (len(name) >= 2 and "executionpolicy".startswith(name)):
             value_index = index if inline_value is not None else index + 1
-            value = inline_value if inline_value is not None else (
-                args[value_index] if value_index < len(args) else ""
-            )
+            value = inline_value if inline_value is not None else (args[value_index] if value_index < len(args) else "")
             if not value:
                 findings.append(_finding("dynamic_eval", "medium"))
                 return findings
@@ -891,11 +982,7 @@ def _powershell_launcher_findings(args: list[str], *, depth: int) -> list[dict[s
             return findings
         if name in _POWERSHELL_TERMINAL_SWITCHES:
             if inline_value is not None or index + 1 != len(args):
-                code = (
-                    "execution_environment_override"
-                    if name in {"v", "version"}
-                    else "dynamic_eval"
-                )
+                code = "execution_environment_override" if name in {"v", "version"} else "dynamic_eval"
                 findings.append(_finding(code, "medium"))
             return findings
         if name in _POWERSHELL_SAFE_SWITCHES:
@@ -906,9 +993,7 @@ def _powershell_launcher_findings(args: list[str], *, depth: int) -> list[dict[s
             continue
         if name in _POWERSHELL_ENVIRONMENT_OPTIONS or name == "custompipename":
             value_index = index if inline_value is not None else index + 1
-            value = inline_value if inline_value is not None else (
-                args[value_index] if value_index < len(args) else ""
-            )
+            value = inline_value if inline_value is not None else (args[value_index] if value_index < len(args) else "")
             if not value:
                 findings.append(_finding("dynamic_eval", "medium"))
                 return findings
@@ -918,9 +1003,7 @@ def _powershell_launcher_findings(args: list[str], *, depth: int) -> list[dict[s
             continue
         if name in _POWERSHELL_VALUE_OPTIONS:
             value_index = index if inline_value is not None else index + 1
-            value = inline_value if inline_value is not None else (
-                args[value_index] if value_index < len(args) else ""
-            )
+            value = inline_value if inline_value is not None else (args[value_index] if value_index < len(args) else "")
             if not value:
                 findings.append(_finding("dynamic_eval", "medium"))
                 return findings
@@ -935,29 +1018,28 @@ def _powershell_launcher_findings(args: list[str], *, depth: int) -> list[dict[s
     findings.append(_finding("dynamic_eval", "medium"))
     return findings
 
+
 def _shell_tokens(command: str) -> list[str]:
     try:
         windows_style = _looks_like_windows_command(command)
         token_source = (
             _WINDOWS_INLINE_GIT_GLOBAL_VALUE_RE.sub(
                 lambda match: (
-                    f"{match.group('quote')}{match.group('option')}="
-                    f"{match.group('value')}{match.group('quote')}"
+                    f"{match.group('quote')}{match.group('option')}={match.group('value')}{match.group('quote')}"
                 ),
                 command,
             )
             if windows_style
             else command
         )
-        lexer = shlex.shlex(
-            token_source, posix=not windows_style, punctuation_chars=";&|<>"
-        )
+        lexer = shlex.shlex(token_source, posix=not windows_style, punctuation_chars=";&|<>")
         lexer.whitespace_split = True
         lexer.commenters = ""
         tokens = list(lexer)
         return [_strip_token_quotes(token) for token in tokens] if windows_style else tokens
     except ValueError:
         return []
+
 
 def _has_shell_indirection(command: str) -> bool:
     windows_style = _looks_like_windows_command(command)
@@ -966,9 +1048,7 @@ def _has_shell_indirection(command: str) -> bool:
             return True
         tokens = _shell_tokens(command)
         executable, _, wrappers = _unwrap_command(tokens)
-        read_only_literal_context = not wrappers and (
-            executable in _READ_ONLY_COMMANDS or executable in {"rg", "sed"}
-        )
+        read_only_literal_context = not wrappers and (executable in _READ_ONLY_COMMANDS or executable in {"rg", "sed"})
         if not read_only_literal_context:
             return True
     quote = ""
@@ -996,13 +1076,12 @@ def _has_shell_indirection(command: str) -> bool:
         next_char = command[index + 1] if index + 1 < len(command) else ""
         if windows_style and not quote and char in "(){}":
             return True
-        if char == "\x60" or (char == "<" and next_char in {"(", "<"}) or (
-            char == ">" and next_char == "("
-        ):
+        if char == "\x60" or (char == "<" and next_char in {"(", "<"}) or (char == ">" and next_char == "("):
             return True
         if char == "$" and (next_char in {"(", "{"} or next_char.isalnum() or next_char in "_@*#?$!-"):
             return True
     return False
+
 
 def _has_unquoted_shell_comment(command: str) -> bool:
     quote = ""
@@ -1025,9 +1104,8 @@ def _has_unquoted_shell_comment(command: str) -> bool:
             return True
     return False
 
-def _split_shell_commands(
-    tokens: list[str], *, windows_style: bool = False
-) -> tuple[list[list[str]], list[str]]:
+
+def _split_shell_commands(tokens: list[str], *, windows_style: bool = False) -> tuple[list[list[str]], list[str]]:
     commands: list[list[str]] = []
     operators: list[str] = []
     current: list[str] = []
@@ -1037,11 +1115,7 @@ def _split_shell_commands(
             and not current
             and index + 1 < len(tokens)
             and _is_literal_powershell_call_target(tokens[index + 1])
-            and (
-                windows_style
-                or _strip_token_quotes(tokens[index + 1]).casefold()
-                in _POWERSHELL_READ_ONLY_COMMANDS
-            )
+            and (windows_style or _strip_token_quotes(tokens[index + 1]).casefold() in _POWERSHELL_READ_ONLY_COMMANDS)
         ):
             continue
         if token in _CONTROL_TOKENS:
@@ -1055,6 +1129,7 @@ def _split_shell_commands(
         commands.append(current)
     return commands, operators
 
+
 def _skip_options(tokens: list[str], value_options: set[str]) -> list[str]:
     index = 0
     while index < len(tokens):
@@ -1065,6 +1140,7 @@ def _skip_options(tokens: list[str], value_options: set[str]) -> list[str]:
             break
         index += 2 if token in value_options and index + 1 < len(tokens) else 1
     return tokens[index:]
+
 
 def _unwrap_command(tokens: list[str]) -> tuple[str, list[str], set[str]]:
     remaining = list(tokens)
@@ -1159,6 +1235,7 @@ def _unwrap_command(tokens: list[str]) -> tuple[str, list[str], set[str]]:
         return executable, remaining[1:], wrappers
     return "", [], wrappers
 
+
 def _git_command(args: list[str]) -> tuple[str, list[str], bool]:
     index = 0
     dynamic_config = False
@@ -1174,11 +1251,7 @@ def _git_command(args: list[str]) -> tuple[str, list[str], bool]:
             dynamic_config = dynamic_config or token in {"-c", "--config-env"}
             index += 2
             continue
-        if any(
-            token.startswith(prefix + "=")
-            for prefix in _GIT_GLOBAL_VALUE_FLAGS
-            if prefix.startswith("--")
-        ):
+        if any(token.startswith(prefix + "=") for prefix in _GIT_GLOBAL_VALUE_FLAGS if prefix.startswith("--")):
             dynamic_config = dynamic_config or token.startswith("--config-env=")
             index += 1
             continue
@@ -1192,6 +1265,7 @@ def _git_command(args: list[str]) -> tuple[str, list[str], bool]:
     if index >= len(args):
         return "", [], dynamic_config
     return args[index], args[index + 1 :], dynamic_config
+
 
 def _git_is_read_only(subcommand: str, args: list[str], dynamic_config: bool) -> bool:
     if dynamic_config or subcommand not in _READ_ONLY_GIT_SUBCOMMANDS:
@@ -1218,8 +1292,7 @@ def _git_is_read_only(subcommand: str, args: list[str], dynamic_config: bool) ->
         }
         option_args = _before_option_terminator(args)
         if any(
-            token.split("=", 1)[0] in mutation_options or _branch_short_options_mutate(token)
-            for token in option_args
+            token.split("=", 1)[0] in mutation_options or _branch_short_options_mutate(token) for token in option_args
         ):
             return False
         positional = [token for token in args if not token.startswith("-")]
@@ -1249,19 +1322,23 @@ def _git_is_read_only(subcommand: str, args: list[str], dynamic_config: bool) ->
         return False
     return True
 
+
 def _before_option_terminator(args: list[str]) -> list[str]:
     try:
         return args[: args.index("--")]
     except ValueError:
         return args
 
+
 def _has_option_before_terminator(args: list[str], options: set[str]) -> bool:
     return any(token in options for token in _before_option_terminator(args))
+
 
 def _branch_short_options_mutate(token: str) -> bool:
     if not token.startswith("-") or token.startswith("--"):
         return False
     return any(letter in "dDmMcCu" for letter in token[1:])
+
 
 def _git_remote_command(args: list[str]) -> tuple[str, list[str]]:
     index = 0
@@ -1270,6 +1347,7 @@ def _git_remote_command(args: list[str]) -> tuple[str, list[str]]:
     if index >= len(args):
         return "", []
     return args[index], args[index + 1 :]
+
 
 def _git_uses_network(subcommand: str, args: list[str]) -> bool:
     if subcommand in _GIT_NETWORK_SUBCOMMANDS:
@@ -1284,6 +1362,7 @@ def _git_uses_network(subcommand: str, args: list[str]) -> bool:
     if action == "set-head":
         return _has_option_before_terminator(remote_args, {"-a", "--auto"})
     return action in {"prune", "update"}
+
 
 def _subcommand_after_options(args: list[str], value_options: set[str]) -> tuple[str, list[str]]:
     index = 0
@@ -1303,14 +1382,17 @@ def _subcommand_after_options(args: list[str], value_options: set[str]) -> tuple
         return "", []
     return args[index], args[index + 1 :]
 
+
 def _tokens_before_separator(args: list[str]) -> list[str]:
     try:
         return args[: args.index("--")]
     except ValueError:
         return args
 
+
 def _has_short_flag(args: list[str], flag: str) -> bool:
     return any(token.startswith("-") and not token.startswith("--") and flag in token[1:] for token in args)
+
 
 def _matches_eval_flag(token: str, flags: set[str]) -> bool:
     for flag in flags:
@@ -1322,8 +1404,65 @@ def _matches_eval_flag(token: str, flags: set[str]) -> bool:
             return True
     return False
 
+
 def _is_shell_eval_flag(token: str) -> bool:
     return token.startswith("-") and not token.startswith("--") and "c" in token[1:]
+
+
+def _is_sensitive_home_relative_redirection_target(relative: str, *, case_insensitive: bool) -> bool:
+    if case_insensitive:
+        relative = relative.casefold()
+        targets = _SENSITIVE_HOME_REDIRECTION_TARGETS_CASEFOLDED
+    else:
+        targets = _SENSITIVE_HOME_REDIRECTION_TARGETS
+    return relative in targets or (relative.startswith(".codex/rules/") and relative.endswith(".rules"))
+
+
+def _is_profile_persistence_redirection_target(target: str) -> bool:
+    normalized = posixpath.normpath(re.sub(r"/+", "/", _strip_token_quotes(target).replace("\\", "/")))
+    system_target = normalized.casefold() if sys.platform == "darwin" else normalized
+    if system_target.startswith(("/etc/", "/private/etc/")) or normalized.endswith(
+        ("/.zshrc", "/.bashrc", "/.profile")
+    ):
+        return True
+
+    expanded_home = posixpath.normpath(re.sub(r"/+", "/", os.path.expanduser("~").replace("\\", "/")))
+    windows_home = os.name == "nt" or bool(re.match(r"(?i)^[A-Z]:/", expanded_home))
+    macos_home = expanded_home.casefold().startswith(_MACOS_HOME_PREFIX)
+    case_insensitive_home = windows_home or macos_home
+    home_prefix = expanded_home + "/"
+    if expanded_home not in {"", "~"} and (
+        normalized.casefold().startswith(home_prefix.casefold())
+        if case_insensitive_home
+        else normalized.startswith(home_prefix)
+    ):
+        return _is_sensitive_home_relative_redirection_target(
+            normalized[len(home_prefix) :],
+            case_insensitive=case_insensitive_home,
+        )
+
+    windows_match = _WINDOWS_HOME_REDIRECTION_RE.fullmatch(normalized)
+    if windows_match:
+        return _is_sensitive_home_relative_redirection_target(
+            windows_match.group("relative"),
+            case_insensitive=True,
+        )
+
+    macos_match = _MACOS_HOME_REDIRECTION_RE.fullmatch(normalized)
+    if macos_match:
+        return _is_sensitive_home_relative_redirection_target(
+            macos_match.group("relative"),
+            case_insensitive=True,
+        )
+
+    posix_match = _POSIX_HOME_REDIRECTION_RE.fullmatch(normalized)
+    if not posix_match:
+        return False
+    return _is_sensitive_home_relative_redirection_target(
+        posix_match.group("relative"),
+        case_insensitive=False,
+    )
+
 
 def _segment_findings(tokens: list[str], depth: int = 0) -> list[dict[str, str]]:
     executable, args, wrappers = _unwrap_command(tokens)
@@ -1353,8 +1492,7 @@ def _segment_findings(tokens: list[str], depth: int = 0) -> list[dict[str, str]]
         if dynamic_config:
             findings.append(_finding("git_dynamic_config", "medium"))
         if any(
-            token in _GIT_SCOPE_FLAGS
-            or any(token.startswith(prefix + "=") for prefix in _GIT_SCOPE_FLAGS)
+            token in _GIT_SCOPE_FLAGS or any(token.startswith(prefix + "=") for prefix in _GIT_SCOPE_FLAGS)
             for token in args
         ):
             findings.append(_finding("git_scope_override", "medium"))
@@ -1440,10 +1578,9 @@ def _segment_findings(tokens: list[str], depth: int = 0) -> list[dict[str, str]]
         package_tokens = _tokens_before_separator(args)
         package_command, package_args = _subcommand_after_options(args, _PACKAGE_VALUE_OPTIONS)
         nested_command, _ = _subcommand_after_options(package_args, _PACKAGE_VALUE_OPTIONS)
-        if (
-            "install" in package_tokens
-            and any(token in {"pip", "tool"} for token in package_tokens)
-        ) or (package_command in {"pip", "tool"} and nested_command == "install"):
+        if ("install" in package_tokens and any(token in {"pip", "tool"} for token in package_tokens)) or (
+            package_command in {"pip", "tool"} and nested_command == "install"
+        ):
             findings.append(_finding("package_install", "medium"))
     if executable in _SYSTEM_PACKAGE_ACTIONS:
         actions = _SYSTEM_PACKAGE_ACTIONS[executable]
@@ -1490,13 +1627,14 @@ def _segment_findings(tokens: list[str], depth: int = 0) -> list[dict[str, str]]
         findings.append(_finding("recursive_world_writable", "medium"))
 
     for index, token in enumerate(tokens[:-1]):
-        if token not in {">", ">>"}:
+        if token not in _PROFILE_REDIRECTION_OPERATORS:
             continue
         target = tokens[index + 1]
-        if target.startswith("/etc/") or target.endswith(("/.zshrc", "/.bashrc", "/.profile")):
+        if _is_profile_persistence_redirection_target(target):
             findings.append(_finding("profile_persistence", "medium"))
 
     return findings
+
 
 def _structured_command_findings(command: str, depth: int = 0) -> list[dict[str, str]]:
     findings: list[dict[str, str]] = []
@@ -1507,9 +1645,7 @@ def _structured_command_findings(command: str, depth: int = 0) -> list[dict[str,
         if command.strip():
             findings.append(_finding("command_parse_error"))
         return _dedupe_findings(findings)
-    commands, operators = _split_shell_commands(
-        tokens, windows_style=_looks_like_windows_command(command)
-    )
+    commands, operators = _split_shell_commands(tokens, windows_style=_looks_like_windows_command(command))
     findings.extend(finding for segment in commands for finding in _segment_findings(segment, depth=depth))
     if "&" in operators:
         findings.append(_finding("background_process", "medium"))
@@ -1522,6 +1658,7 @@ def _structured_command_findings(command: str, depth: int = 0) -> list[dict[str,
             findings.append(_finding("curl_pipe_shell"))
     return _dedupe_findings(findings)
 
+
 def _dedupe_findings(items: list[dict[str, str]]) -> list[dict[str, str]]:
     deduped: list[dict[str, str]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -1533,6 +1670,7 @@ def _dedupe_findings(items: list[dict[str, str]]) -> list[dict[str, str]]:
         deduped.append(item)
     return deduped
 
+
 def _fallback_scan_text(text: str) -> list[dict[str, str]]:
     return [
         {"severity": "high", "category": "secret", "code": code}
@@ -1540,17 +1678,20 @@ def _fallback_scan_text(text: str) -> list[dict[str, str]]:
         if pattern.search(text)
     ]
 
-def _scan_text(text: str, *, source: str) -> list[dict[str, str]]:
-    del source
+
+def _scan_text(text: str) -> list[dict[str, str]]:
     return _fallback_scan_text(text)
+
 
 def _is_reparse_info(info: os.stat_result) -> bool:
     attributes = int(getattr(info, "st_file_attributes", 0))
     marker = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
     return bool(marker and attributes & marker)
 
+
 def _matches_policy_values(text: str, values: Sequence[str]) -> bool:
     return any(re.search(re.escape(value), text, re.IGNORECASE) for value in values)
+
 
 def _session_id(event: dict[str, Any]) -> str:
     session_id = str(event.get("session_id") or "").strip()
@@ -1558,8 +1699,10 @@ def _session_id(event: dict[str, Any]) -> str:
         raise ValueError("session_id is required")
     return session_id
 
+
 def _secret_found(findings: list[dict[str, str]]) -> bool:
     return any(item["category"] == "secret" for item in findings)
+
 
 def _dangerous_codes(findings: list[dict[str, str]]) -> set[str]:
     return {
@@ -1568,6 +1711,7 @@ def _dangerous_codes(findings: list[dict[str, str]]) -> set[str]:
         if item["category"] == "dangerous_command"
         and SEVERITY_ORDER.get(item["severity"], 0) >= SEVERITY_ORDER["medium"]
     }
+
 
 def _command_hash(command: str, cwd: str) -> str:
     if _has_unquoted_shell_comment(command):
@@ -1591,14 +1735,8 @@ def _command_hash(command: str, cwd: str) -> str:
             global_arg_count = len(args) - len(exact_git_args) - 1
             if global_arg_count < 0:
                 return ""
-            exact_global_args = [
-                _normalize_git_global_arg(token)
-                for token in args[:global_arg_count]
-            ]
-            if any(
-                token == "--exec-path" or token.startswith("--exec-path=")
-                for token in exact_global_args
-            ):
+            exact_global_args = [_normalize_git_global_arg(token) for token in args[:global_arg_count]]
+            if any(token == "--exec-path" or token.startswith("--exec-path=") for token in exact_global_args):
                 return ""
             remote_identities = _git_remote_identities(
                 normalized_cwd,
@@ -1610,9 +1748,11 @@ def _command_hash(command: str, cwd: str) -> str:
             canonical += "\0push-target\0" + remote_identities[0]
     return hashlib.sha256(canonical.encode("utf-8", errors="replace")).hexdigest()
 
+
 def _normalized_cwd(cwd: str) -> str:
     resolved = os.path.realpath(os.path.abspath(os.path.expanduser(cwd or ".")))
     return os.path.normcase(resolved)
+
 
 def _git_repo_root(cwd: str) -> str:
     normalized = Path(_normalized_cwd(cwd))
@@ -1622,12 +1762,15 @@ def _git_repo_root(cwd: str) -> str:
             return _normalized_cwd(str(candidate))
     return _normalized_cwd(str(start))
 
+
 def _scope_identity(cwd: str, *, exact: bool = False) -> str:
     return _normalized_cwd(cwd) if exact else _git_repo_root(cwd)
+
 
 def _scope_hash(cwd: str, *, exact: bool = False) -> str:
     identity = _scope_identity(cwd, exact=exact)
     return hashlib.sha256(identity.encode("utf-8", errors="replace")).hexdigest()
+
 
 def _git_scope_and_args(args: list[str], cwd: str) -> tuple[str, list[str]]:
     scope = _normalized_cwd(cwd)
@@ -1660,6 +1803,7 @@ def _git_scope_and_args(args: list[str], cwd: str) -> tuple[str, list[str]]:
         break
     return scope, canonical
 
+
 def _normalize_git_global_arg(token: str) -> str:
     for option in _GIT_GLOBAL_VALUE_FLAGS:
         if not option.startswith("--"):
@@ -1670,6 +1814,7 @@ def _normalize_git_global_arg(token: str) -> str:
         value = token[len(prefix) :]
         return prefix + _strip_token_quotes(value)
     return token
+
 
 def _safe_branch_name(refspec: str) -> str:
     if refspec.startswith("refs/") and not refspec.startswith("refs/heads/"):
@@ -1683,6 +1828,7 @@ def _safe_branch_name(refspec: str) -> str:
         return ""
     return branch
 
+
 def _safe_clone_branch(refspec: str) -> str:
     branch = _safe_branch_name(refspec)
     if not branch:
@@ -1691,6 +1837,7 @@ def _safe_clone_branch(refspec: str) -> str:
     if any(component.startswith(".") or component.endswith(".lock") for component in components):
         return ""
     return branch
+
 
 def _github_https_clone_target(source: str) -> str:
     if (
@@ -1726,17 +1873,17 @@ def _github_https_clone_target(source: str) -> str:
         return ""
     return f"{owner}/{repo}"
 
+
 def _path_within(path: str, root: str) -> bool:
     try:
         return os.path.commonpath((path, root)) == root
     except ValueError:
         return False
 
+
 def _clone_path_has_sensitive_component(path: str) -> bool:
-    return any(
-        part.casefold() in _CONSTRAINED_CLONE_SENSITIVE_COMPONENTS
-        for part in Path(path).parts
-    )
+    return any(part.casefold() in _CONSTRAINED_CLONE_SENSITIVE_COMPONENTS for part in Path(path).parts)
+
 
 def _clone_path_is_system_sensitive(path: str) -> bool:
     normalized = _normalized_cwd(path)
@@ -1748,6 +1895,7 @@ def _clone_path_is_system_sensitive(path: str) -> bool:
     return normalized in broad_roots or any(
         normalized == root or _path_within(normalized, root) for root in system_roots
     )
+
 
 def _clone_workspace_root(cwd: str) -> str:
     root = _normalized_cwd(cwd)
@@ -1764,9 +1912,11 @@ def _clone_workspace_root(cwd: str) -> str:
         return ""
     return root
 
+
 def _clone_parent_access_mode() -> int:
     # Windows directory traversal does not use a POSIX executable bit.
     return os.W_OK if os.name == "nt" else os.W_OK | os.X_OK
+
 
 def _clone_destination_allowed(destination: str, workspace_cwd: str) -> bool:
     if (
@@ -1799,15 +1949,14 @@ def _clone_destination_allowed(destination: str, workspace_cwd: str) -> bool:
     if _clone_path_has_sensitive_component(resolved) or _clone_path_is_system_sensitive(resolved):
         return False
     workspace_root = _clone_workspace_root(workspace_cwd)
-    if not workspace_root or resolved == workspace_root or not _path_within(
-        resolved, workspace_root
-    ):
+    if not workspace_root or resolved == workspace_root or not _path_within(resolved, workspace_root):
         return False
     return (
         lexical_parent.is_dir()
         and stat.S_ISDIR(lexical_info.st_mode)
         and os.access(lexical_parent, _clone_parent_access_mode())
     )
+
 
 def _constrained_github_clone_candidate(
     command: str,
@@ -1819,10 +1968,7 @@ def _constrained_github_clone_candidate(
     normalized_effective_cwd = _normalized_cwd(effective_cwd)
     if (
         not workspace_root
-        or not (
-            normalized_effective_cwd == workspace_root
-            or _path_within(normalized_effective_cwd, workspace_root)
-        )
+        or not (normalized_effective_cwd == workspace_root or _path_within(normalized_effective_cwd, workspace_root))
         or not command.strip()
         or "$" in command
         or _SHELL_CONTROL_RE.search(command)
@@ -1889,6 +2035,7 @@ def _constrained_github_clone_candidate(
         "destination": _normalized_cwd(destination),
     }
 
+
 def _exact_github_clone_candidate(
     command: str,
     *,
@@ -1900,10 +2047,7 @@ def _exact_github_clone_candidate(
     normalized_effective_cwd = _normalized_cwd(effective_cwd)
     if (
         not workspace_root
-        or not (
-            normalized_effective_cwd == workspace_root
-            or _path_within(normalized_effective_cwd, workspace_root)
-        )
+        or not (normalized_effective_cwd == workspace_root or _path_within(normalized_effective_cwd, workspace_root))
         or not command.strip()
         or "$" in command
         or _SHELL_CONTROL_RE.search(command)
@@ -1933,19 +2077,17 @@ def _exact_github_clone_candidate(
         "destination": _normalized_cwd(destination),
     }
 
+
 def _looks_like_git_clone(destination: str) -> bool:
     root = Path(destination)
     return bool(
         root.is_dir()
         and (
             (root / ".git").exists()
-            or (
-                (root / "HEAD").is_file()
-                and (root / "objects").is_dir()
-                and (root / "refs").is_dir()
-            )
+            or ((root / "HEAD").is_file() and (root / "objects").is_dir() and (root / "refs").is_dir())
         )
     )
+
 
 def _tracked_clone_roots(state: dict[str, Any]) -> tuple[str, ...]:
     roots = state.get("untrusted_clone_roots")
@@ -1959,10 +2101,9 @@ def _tracked_clone_roots(state: dict[str, Any]) -> tuple[str, ...]:
             if destination and _looks_like_git_clone(destination):
                 paths.append(destination)
     return tuple(
-        _normalized_cwd(path)
-        for path in _ordered_unique(paths)
-        if isinstance(path, str) and os.path.isabs(path)
+        _normalized_cwd(path) for path in _ordered_unique(paths) if isinstance(path, str) and os.path.isabs(path)
     )
+
 
 def _command_path_candidates(command: str, cwd: str) -> tuple[str, ...]:
     paths: list[str] = []
@@ -1976,12 +2117,7 @@ def _command_path_candidates(command: str, cwd: str) -> tuple[str, ...]:
                 or value.startswith("-")
                 or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value)
                 or value.startswith("git@")
-                or not (
-                    os.path.isabs(value)
-                    or value.startswith((".", "~"))
-                    or "/" in value
-                    or "\\" in value
-                )
+                or not (os.path.isabs(value) or value.startswith((".", "~")) or "/" in value or "\\" in value)
             ):
                 continue
             expanded = os.path.expanduser(value)
@@ -1989,17 +2125,15 @@ def _command_path_candidates(command: str, cwd: str) -> tuple[str, ...]:
             paths.append(_normalized_cwd(candidate))
     return tuple(_ordered_unique(paths))
 
+
 def _command_uses_untrusted_clone(command: str, cwd: str, roots: tuple[str, ...]) -> bool:
     if not roots or _is_strictly_read_only_command(command):
         return False
     normalized_cwd = _normalized_cwd(cwd)
     if any(_path_within(normalized_cwd, root) for root in roots):
         return True
-    return any(
-        _path_within(path, root)
-        for path in _command_path_candidates(command, normalized_cwd)
-        for root in roots
-    )
+    return any(_path_within(path, root) for path in _command_path_candidates(command, normalized_cwd) for root in roots)
+
 
 def _safe_push_target(git_args: list[str]) -> tuple[str, str] | None:
     ignored = _SCOPED_PUSH_OPTIONS | {"--"}
@@ -2013,6 +2147,7 @@ def _safe_push_target(git_args: list[str]) -> tuple[str, str] | None:
         return None
     branch = _safe_branch_name(refspec)
     return (remote, branch) if branch else None
+
 
 def _exact_push_remote(git_args: list[str]) -> str | None:
     positionals: list[str] = []
@@ -2060,6 +2195,7 @@ def _exact_push_remote(git_args: list[str]) -> str | None:
         return None
     return remote
 
+
 def _github_target_from_remote(url: str) -> str:
     patterns = (
         r"git@github\.com:(?P<target>[A-Za-z0-9][A-Za-z0-9.-]*/[A-Za-z0-9][A-Za-z0-9._-]*)(?:\.git)?/?$",
@@ -2072,6 +2208,7 @@ def _github_target_from_remote(url: str) -> str:
             return match.group("target").removesuffix(".git")
     return ""
 
+
 def _git_remote_urls(
     scope: str,
     remote: str,
@@ -2081,6 +2218,9 @@ def _git_remote_urls(
 ) -> tuple[str, ...]:
     if not remote or remote.startswith("-"):
         return ()
+    cache_key = _git_query_cache_key("remote-urls", scope, remote, exact_global_args, environment)
+    if cache_key is not None and cache_key in _GIT_QUERY_CACHE:
+        return _GIT_QUERY_CACHE[cache_key]
     if exact_global_args is None:
         command = ["git", "-C", scope, "remote", "get-url", "--push", "--all", remote]
         run_cwd = None
@@ -2095,23 +2235,15 @@ def _git_remote_urls(
             remote,
         ]
         run_cwd = scope
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=run_cwd,
-            env=environment,
-            text=True,
-            capture_output=True,
-            timeout=3,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ()
-    if completed.returncode != 0:
-        return ()
-    return tuple(
-        line.strip() for line in completed.stdout.splitlines() if line.strip()
-    )
+    completed = _run_git_query(command, cwd=run_cwd, environment=environment)
+    if completed is None or completed.returncode != 0:
+        result: tuple[str, ...] = ()
+    else:
+        result = tuple(line.strip() for line in completed.stdout.splitlines() if line.strip())
+    if cache_key is not None:
+        _GIT_QUERY_CACHE[cache_key] = result
+    return result
+
 
 def _git_remote_targets(
     scope: str,
@@ -2132,6 +2264,7 @@ def _git_remote_targets(
     targets = tuple(_github_target_from_remote(url) for url in captured_urls)
     return targets if targets and all(targets) else ()
 
+
 def _git_config_values(
     scope: str,
     key: str,
@@ -2139,31 +2272,26 @@ def _git_config_values(
     exact_global_args: list[str] | None = None,
     environment: dict[str, str] | None = None,
 ) -> tuple[str, ...] | None:
+    cache_key = _git_query_cache_key("config-values", scope, key, exact_global_args, environment)
+    if cache_key is not None and cache_key in _GIT_QUERY_CACHE:
+        return _GIT_QUERY_CACHE[cache_key]
     if exact_global_args is None:
         command = ["git", "-C", scope, "config", "--get-all", key]
         run_cwd = None
     else:
         command = ["git", *exact_global_args, "config", "--get-all", key]
         run_cwd = scope
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=run_cwd,
-            env=environment,
-            text=True,
-            capture_output=True,
-            timeout=3,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if completed.returncode == 1:
-        return ()
-    if completed.returncode != 0:
-        return None
-    return tuple(
-        line.strip() for line in completed.stdout.splitlines() if line.strip()
-    )
+    completed = _run_git_query(command, cwd=run_cwd, environment=environment)
+    if completed is None or completed.returncode not in {0, 1}:
+        result: tuple[str, ...] | None = None
+    elif completed.returncode == 1:
+        result = ()
+    else:
+        result = tuple(line.strip() for line in completed.stdout.splitlines() if line.strip())
+    if cache_key is not None:
+        _GIT_QUERY_CACHE[cache_key] = result
+    return result
+
 
 def _safe_git_push_url(url: str) -> str:
     value = url.strip()
@@ -2190,19 +2318,17 @@ def _safe_git_push_url(url: str) -> str:
         return ""
     if scheme == "https" and parsed.username is not None:
         return ""
-    if scheme == "ssh" and parsed.username and not re.fullmatch(
-        r"[A-Za-z0-9._-]+", parsed.username
-    ):
+    if scheme == "ssh" and parsed.username and not re.fullmatch(r"[A-Za-z0-9._-]+", parsed.username):
         return ""
     return value
+
 
 def _git_push_url_identity(url: str) -> str:
     safe_url = _safe_git_push_url(url)
     if not safe_url:
         return ""
-    return hashlib.sha256(
-        ("git-push-url\0" + safe_url).encode("utf-8", errors="replace")
-    ).hexdigest()
+    return hashlib.sha256(("git-push-url\0" + safe_url).encode("utf-8", errors="replace")).hexdigest()
+
 
 def _git_remote_identities(
     scope: str,
@@ -2232,10 +2358,7 @@ def _git_remote_identities(
         exact_global_args=exact_global_args,
         environment=environment,
     )
-    if recurse_values is None or any(
-        value.casefold() not in {"0", "false", "no", "off"}
-        for value in recurse_values
-    ):
+    if recurse_values is None or any(value.casefold() not in {"0", "false", "no", "off"} for value in recurse_values):
         return ()
     captured_urls = urls
     if captured_urls is None:
@@ -2265,24 +2388,17 @@ def _git_remote_identities(
             return ()
     return tuple(_git_push_url_identity(url) for url in safe_urls)
 
-def _scoped_git_candidate(
-    command: str, cwd: str, dangerous: set[str]
-) -> dict[str, Any] | None:
+
+def _scoped_git_candidate(command: str, cwd: str, dangerous: set[str]) -> dict[str, Any] | None:
     if _SHELL_CONTROL_RE.search(command) or _has_shell_indirection(command):
         return None
     tokens = _shell_tokens(command)
     executable, args, wrappers = _unwrap_command(tokens)
-    if (
-        executable != "git"
-        or wrappers
-        or not tokens
-        or not _trusted_executable_token(tokens[0], "git")
-    ):
+    if executable != "git" or wrappers or not tokens or not _trusted_executable_token(tokens[0], "git"):
         return None
     scope, canonical_args = _git_scope_and_args(args, cwd)
     if "--bare" in canonical_args or any(
-        token in _GIT_SCOPE_FLAGS
-        or any(token.startswith(flag + "=") for flag in _GIT_SCOPE_FLAGS)
+        token in _GIT_SCOPE_FLAGS or any(token.startswith(flag + "=") for flag in _GIT_SCOPE_FLAGS)
         for token in canonical_args
     ):
         return None
@@ -2358,19 +2474,14 @@ def _scoped_git_candidate(
         candidate["remote"], candidate["refspec"] = push_target
         remote_urls = _git_remote_urls(scope, candidate["remote"])
         candidate["remote_urls"] = list(remote_urls)
-        candidate["remote_targets"] = list(
-            _git_remote_targets(scope, candidate["remote"], urls=remote_urls)
-        )
-        candidate["remote_identities"] = list(
-            _git_remote_identities(scope, candidate["remote"], urls=remote_urls)
-        )
+        candidate["remote_targets"] = list(_git_remote_targets(scope, candidate["remote"], urls=remote_urls))
+        candidate["remote_identities"] = list(_git_remote_identities(scope, candidate["remote"], urls=remote_urls))
     elif subcommand == "init":
         candidate["branch"] = branch
     return candidate
 
-def _parse_github_create_candidate(
-    command: str, cwd: str, dangerous: set[str]
-) -> tuple[dict[str, Any], str] | None:
+
+def _parse_github_create_candidate(command: str, cwd: str, dangerous: set[str]) -> tuple[dict[str, Any], str] | None:
     if (
         dangerous != {"github_network", "github_repo_create"}
         or _SHELL_CONTROL_RE.search(command)
@@ -2379,18 +2490,10 @@ def _parse_github_create_candidate(
         return None
     tokens = _shell_tokens(command)
     executable, args, wrappers = _unwrap_command(tokens)
-    if (
-        executable != "gh"
-        or wrappers
-        or not tokens
-        or len(args) < 3
-        or args[:2] != ["repo", "create"]
-    ):
+    if executable != "gh" or wrappers or not tokens or len(args) < 3 or args[:2] != ["repo", "create"]:
         return None
     target = args[2]
-    if not re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9.-]*/[A-Za-z0-9][A-Za-z0-9._-]*", target
-    ):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*/[A-Za-z0-9][A-Za-z0-9._-]*", target):
         return None
     source = ""
     remote = ""
@@ -2442,9 +2545,8 @@ def _parse_github_create_candidate(
         tokens[0],
     )
 
-def _prompt_github_create_candidate(
-    command: str, cwd: str, dangerous: set[str]
-) -> dict[str, Any] | None:
+
+def _prompt_github_create_candidate(command: str, cwd: str, dangerous: set[str]) -> dict[str, Any] | None:
     parsed = _parse_github_create_candidate(command, cwd, dangerous)
     if not parsed:
         return None
@@ -2454,8 +2556,10 @@ def _prompt_github_create_candidate(
         return None
     return candidate
 
+
 def _ordered_unique(items: list[str]) -> list[str]:
     return list(dict.fromkeys(item for item in items if item))
+
 
 def _authorization_clauses(
     prompt: str, approval_pattern: re.Pattern[str], *, git_continuations: bool = False
@@ -2482,12 +2586,10 @@ def _authorization_clauses(
         clauses.append(clause)
     return clauses
 
+
 def _git_authorization_text(prompt: str) -> str:
-    return "\n".join(
-        _authorization_clauses(
-            prompt, _LOCAL_GIT_APPROVAL_RE, git_continuations=True
-        )
-    )
+    return "\n".join(_authorization_clauses(prompt, _LOCAL_GIT_APPROVAL_RE, git_continuations=True))
+
 
 def _prompt_clone_candidates(prompt: str, cwd: str) -> list[dict[str, str]]:
     candidates: list[dict[str, str]] = []
@@ -2512,9 +2614,8 @@ def _prompt_clone_candidates(prompt: str, cwd: str) -> list[dict[str, str]]:
             candidates.append(candidate)
     return candidates
 
-def _prompt_git_operation_digests(
-    prompt: str, cwd: str
-) -> dict[str, dict[str, str]] | None:
+
+def _prompt_git_operation_digests(prompt: str, cwd: str) -> dict[str, dict[str, str]] | None:
     bindings: dict[str, dict[str, str]] = {}
     for segment in _AUTH_SEGMENT_SPLIT_RE.split(prompt):
         code_spans = re.findall(r"`([^`\n]+)`", segment)
@@ -2540,6 +2641,7 @@ def _prompt_git_operation_digests(
             bindings[scope_hash][operation] = digest
     return bindings
 
+
 def _prompt_absolute_paths(prompt: str) -> list[str]:
     matches: list[tuple[int, int, str]] = []
     occupied: list[tuple[int, int]] = []
@@ -2552,29 +2654,20 @@ def _prompt_absolute_paths(prompt: str) -> list[str]:
         occupied.append((match.start(), match.end()))
     for pattern in (_ABSOLUTE_PATH_RE, _WINDOWS_ABSOLUTE_PATH_RE):
         for match in pattern.finditer(prompt):
-            if any(
-                start <= match.start() < end
-                for start, end in (*occupied, *uri_spans)
-            ):
+            if any(start <= match.start() < end for start, end in (*occupied, *uri_spans)):
                 continue
             path = match.group(1).strip("\"'").rstrip(")]}>、")
             matches.append((match.start(), match.end(), path))
     return _ordered_unique([_normalized_cwd(item[2]) for item in sorted(matches)])
 
-def _prompt_command_scopes(
-    prompt: str, cwd: str, *, include_implicit_cwd: bool = False
-) -> list[str]:
+
+def _prompt_command_scopes(prompt: str, cwd: str, *, include_implicit_cwd: bool = False) -> list[str]:
     scopes: list[str] = []
     for segment in _AUTH_SEGMENT_SPLIT_RE.split(prompt):
         for command in _authorization_command_candidates(segment):
             tokens = _shell_tokens(command)
             executable, args, wrappers = _unwrap_command(tokens)
-            if (
-                executable == "git"
-                and not wrappers
-                and tokens
-                and _trusted_executable_token(tokens[0], "git")
-            ):
+            if executable == "git" and not wrappers and tokens and _trusted_executable_token(tokens[0], "git"):
                 if "-C" not in args and not include_implicit_cwd:
                     continue
                 scope, canonical_args = _git_scope_and_args(args, cwd)
@@ -2582,20 +2675,18 @@ def _prompt_command_scopes(
                 if not dynamic_config and subcommand in _SCOPED_GIT_OPERATIONS:
                     scopes.append(_scope_identity(scope, exact=subcommand == "init"))
                 continue
-            candidate = _prompt_github_create_candidate(
-                command, cwd, {"github_network", "github_repo_create"}
-            )
+            candidate = _prompt_github_create_candidate(command, cwd, {"github_network", "github_repo_create"})
             if candidate:
                 scopes.append(str(candidate["scope"]))
     return _ordered_unique(scopes)
+
 
 def _pending_git_usable(pending: dict[str, Any] | None) -> bool:
     if not isinstance(pending, dict) or pending.get("ambiguous") or not pending.get("digest"):
         return False
     created_at = pending.get("created_at")
-    return isinstance(created_at, (int, float)) and (
-        0 <= time.time() - float(created_at) <= _PENDING_GIT_TTL_SECONDS
-    )
+    return isinstance(created_at, (int, float)) and (0 <= time.time() - float(created_at) <= _PENDING_GIT_TTL_SECONDS)
+
 
 def _prompt_git_scopes(
     prompt: str,
@@ -2614,19 +2705,14 @@ def _prompt_git_scopes(
     if _PENDING_COMMAND_REFERENCE_RE.search(prompt) and _pending_git_usable(pending):
         scope = str(pending.get("scope") or "")
         if scope:
-            return [
-                _scope_identity(scope, exact=str(pending.get("operation") or "") == "init")
-            ]
+            return [_scope_identity(scope, exact=str(pending.get("operation") or "") == "init")]
     return []
 
-def _prompt_push_target(
-    prompt: str, cwd: str, pending: dict[str, Any] | None
-) -> tuple[str, str] | None:
+
+def _prompt_push_target(prompt: str, cwd: str, pending: dict[str, Any] | None) -> tuple[str, str] | None:
     for segment in _AUTH_SEGMENT_SPLIT_RE.split(prompt):
         for command in _authorization_command_candidates(segment):
-            candidate = _scoped_git_candidate(
-                command, cwd, {"git_network", "git_non_read_only", "git_push"}
-            )
+            candidate = _scoped_git_candidate(command, cwd, {"git_network", "git_non_read_only", "git_push"})
             if candidate and candidate.get("operation") == "push":
                 return str(candidate["remote"]), str(candidate["refspec"])
     for clause in _AUTH_SEGMENT_SPLIT_RE.split(prompt):
@@ -2659,6 +2745,7 @@ def _prompt_push_target(
             return remote, refspec
     return None
 
+
 def _prompt_init_branch(prompt: str, cwd: str, pending: dict[str, Any] | None) -> str:
     for segment in _AUTH_SEGMENT_SPLIT_RE.split(prompt):
         for command in _authorization_command_candidates(segment):
@@ -2672,6 +2759,7 @@ def _prompt_init_branch(prompt: str, cwd: str, pending: dict[str, Any] | None) -
     ):
         return str(pending.get("branch") or "")
     return ""
+
 
 def _prompt_github_targets(prompt: str) -> list[str]:
     targets = [match.group("target") for match in _GITHUB_CREATE_COMMAND_RE.finditer(prompt)]
@@ -2689,37 +2777,30 @@ def _prompt_github_targets(prompt: str) -> list[str]:
                 targets.append(f"{owner}/{name}")
     return _ordered_unique(targets)
 
+
 def _prompt_github_mappings(prompt: str, cwd: str) -> dict[str, str]:
     mappings: dict[str, str] = {}
     for segment in _AUTH_SEGMENT_SPLIT_RE.split(prompt):
         for command in _authorization_command_candidates(segment):
-            candidate = _prompt_github_create_candidate(
-                command, cwd, {"github_network", "github_repo_create"}
-            )
+            candidate = _prompt_github_create_candidate(command, cwd, {"github_network", "github_repo_create"})
             if candidate:
                 mappings[str(candidate["scope_hash"])] = str(candidate["target"])
     return mappings
+
 
 def _authorization_prose(text: str) -> str:
     prose = re.sub(r"`[^`\r\n]*`", " ", text)
     prose = re.sub(r"(?P<quote>['\"])[^'\"\r\n]*?(?P=quote)", " ", prose)
     return _QUOTED_ABSOLUTE_PATH_RE.sub(" ", prose)
 
+
 def _explicit_git_operation_list(text: str) -> set[str]:
     candidate = text.strip()
     match = _GIT_OPERATION_LIST_RE.search(candidate)
-    if (
-        not match
-        or match.start() != 0
-        or candidate[match.end() :].strip(" `。；.!?")
-    ):
+    if not match or match.start() != 0 or candidate[match.end() :].strip(" `。；.!?"):
         return set()
-    return {
-        item.casefold()
-        for item in re.findall(
-            r"(?i)(?:init|add|commit|push)", match.group("operations")
-        )
-    }
+    return {item.casefold() for item in re.findall(r"(?i)(?:init|add|commit|push)", match.group("operations"))}
+
 
 def _prompt_git_operations(prompt: str, cwd: str) -> set[str]:
     operations: set[str] = set()
@@ -2729,45 +2810,30 @@ def _prompt_git_operations(prompt: str, cwd: str) -> set[str]:
             for command in commands:
                 tokens = _shell_tokens(command)
                 executable, args, wrappers = _unwrap_command(tokens)
-                if (
-                    executable != "git"
-                    or wrappers
-                    or not tokens
-                    or not _trusted_executable_token(tokens[0], "git")
-                ):
+                if executable != "git" or wrappers or not tokens or not _trusted_executable_token(tokens[0], "git"):
                     continue
                 _, canonical_args = _git_scope_and_args(args, cwd)
                 subcommand, _, dynamic_config = _git_command(canonical_args)
                 if not dynamic_config and subcommand in _SCOPED_GIT_OPERATIONS:
                     operations.add(subcommand)
                 if not dynamic_config:
-                    operations.update(
-                        _explicit_git_operation_list(
-                            "git " + " ".join(canonical_args)
-                        )
-                    )
+                    operations.update(_explicit_git_operation_list("git " + " ".join(canonical_args)))
             continue
         for match in _GIT_OPERATION_LIST_RE.finditer(_authorization_prose(segment)):
             operations.update(
-                item.casefold()
-                for item in re.findall(
-                    r"(?i)(?:init|add|commit|push)", match.group("operations")
-                )
+                item.casefold() for item in re.findall(r"(?i)(?:init|add|commit|push)", match.group("operations"))
             )
 
     for segment in _AUTH_SEGMENT_SPLIT_RE.split(prompt):
         if _authorization_command_candidates(segment):
             continue
-        for match in _CHINESE_GIT_OPERATION_LIST_RE.finditer(
-            _authorization_prose(segment)
-        ):
+        for match in _CHINESE_GIT_OPERATION_LIST_RE.finditer(_authorization_prose(segment)):
             operations.update(
                 _CHINESE_GIT_OPERATION_MAP[item]
-                for item in re.findall(
-                    r"初始化|暂存|提交|推送", match.group("operations")
-                )
+                for item in re.findall(r"初始化|暂存|提交|推送", match.group("operations"))
             )
     return operations
+
 
 def _local_git_grant_from_prompt(
     prompt: str,
@@ -2777,10 +2843,7 @@ def _local_git_grant_from_prompt(
     session_id: str = "",
 ) -> dict[str, Any] | None:
     policy = policy_store.load_policy()
-    if not (
-        policy.enable_natural_language_approvals
-        and policy.enable_scoped_git_transactions
-    ):
+    if not (policy.enable_natural_language_approvals and policy.enable_scoped_git_transactions):
         return None
     authorization_text = _git_authorization_text(prompt)
     if (
@@ -2800,9 +2863,7 @@ def _local_git_grant_from_prompt(
     github_targets = _prompt_github_targets(authorization_text)
     if github_targets:
         operations.add("repo_create")
-    pending_reference = bool(
-        _PENDING_COMMAND_REFERENCE_RE.search(authorization_text) and _pending_git_usable(pending)
-    )
+    pending_reference = bool(_PENDING_COMMAND_REFERENCE_RE.search(authorization_text) and _pending_git_usable(pending))
     if not operations and pending_reference:
         operation = str(pending.get("operation") or "")
         if operation in _SCOPED_TRANSACTION_OPERATIONS:
@@ -2818,10 +2879,7 @@ def _local_git_grant_from_prompt(
     scopes = _prompt_git_scopes(authorization_text, cwd, pending, operations)
     push_target = parsed_push_target if "push" in operations else None
     clone_candidates = _prompt_clone_candidates(authorization_text, cwd)
-    clone_bindings = {
-        _scope_hash(candidate["destination"], exact=True): candidate
-        for candidate in clone_candidates
-    }
+    clone_bindings = {_scope_hash(candidate["destination"], exact=True): candidate for candidate in clone_candidates}
     if "push" in operations and not github_targets and len(scopes) == 1:
         scope_hash = _scope_hash(scopes[0], exact=True)
         clone_binding = clone_bindings.get(scope_hash)
@@ -2831,15 +2889,9 @@ def _local_git_grant_from_prompt(
             remote_targets = _git_remote_targets(scopes[0], "origin")
             if len(remote_targets) == 1:
                 github_targets = [remote_targets[0]]
-    if (
-        not operations
-        or not scopes
-        or ("push" in operations and (push_target is None or not github_targets))
-    ):
+    if not operations or not scopes or ("push" in operations and (push_target is None or not github_targets)):
         return None
-    init_branch = _prompt_init_branch(authorization_text, cwd, pending) or (
-        push_target[1] if push_target else ""
-    )
+    init_branch = _prompt_init_branch(authorization_text, cwd, pending) or (push_target[1] if push_target else "")
     if "init" in operations and not init_branch:
         return None
     explicit_mappings = _prompt_github_mappings(authorization_text, cwd)
@@ -2891,9 +2943,7 @@ def _local_git_grant_from_prompt(
         and not _CURRENT_REPO_RE.search(authorization_text)
     ):
         pending_digest = str(pending.get("digest") or "")
-    session_hash = hashlib.sha256(
-        session_id.encode("utf-8", errors="replace")
-    ).hexdigest()[:16]
+    session_hash = hashlib.sha256(session_id.encode("utf-8", errors="replace")).hexdigest()[:16]
     authorization_cwd = _normalized_cwd(cwd)
     issued_at = time.time()
     grant = {
@@ -2919,10 +2969,9 @@ def _local_git_grant_from_prompt(
         separators=(",", ":"),
         sort_keys=True,
     )
-    grant["transaction_id"] = hashlib.sha256(
-        transaction_material.encode("utf-8")
-    ).hexdigest()[:16]
+    grant["transaction_id"] = hashlib.sha256(transaction_material.encode("utf-8")).hexdigest()[:16]
     return grant
+
 
 def _git_transaction_resume_requested(prompt: str) -> bool:
     policy = policy_store.load_policy()
@@ -2937,32 +2986,24 @@ def _git_transaction_resume_requested(prompt: str) -> bool:
         and not _NEGATED_GIT_OPERATION_RE.search(authorization_text)
     )
 
+
 def _authorized_git_command_scopes(prompt: str, cwd: str) -> list[str]:
     scopes: list[str] = []
     for segment in _AUTH_SEGMENT_SPLIT_RE.split(prompt):
         for command in _authorization_command_candidates(segment):
             tokens = _shell_tokens(command)
             executable, args, wrappers = _unwrap_command(tokens)
-            if (
-                executable != "git"
-                or wrappers
-                or not tokens
-                or not _trusted_executable_token(tokens[0], "git")
-            ):
+            if executable != "git" or wrappers or not tokens or not _trusted_executable_token(tokens[0], "git"):
                 continue
             scope, _ = _git_scope_and_args(args, cwd)
             scopes.append(_scope_identity(scope, exact=True))
     return _ordered_unique(scopes)
 
+
 def _is_repository_identity_config_command(command: str, cwd: str) -> bool:
     tokens = _shell_tokens(command)
     executable, args, wrappers = _unwrap_command(tokens)
-    if (
-        not tokens
-        or wrappers
-        or executable != "git"
-        or not _trusted_executable_token(tokens[0], "git")
-    ):
+    if not tokens or wrappers or executable != "git" or not _trusted_executable_token(tokens[0], "git"):
         return False
     _, canonical_args = _git_scope_and_args(args, cwd)
     subcommand, git_args, dynamic_config = _git_command(canonical_args)
@@ -2977,15 +3018,11 @@ def _is_repository_identity_config_command(command: str, cwd: str) -> bool:
         and git_args[2]
     )
 
+
 def _is_strict_identity_amend_command(command: str, cwd: str) -> bool:
     tokens = _shell_tokens(command)
     executable, args, wrappers = _unwrap_command(tokens)
-    if (
-        not tokens
-        or wrappers
-        or executable != "git"
-        or not _trusted_executable_token(tokens[0], "git")
-    ):
+    if not tokens or wrappers or executable != "git" or not _trusted_executable_token(tokens[0], "git"):
         return False
     _, canonical_args = _git_scope_and_args(args, cwd)
     subcommand, git_args, dynamic_config = _git_command(canonical_args)
@@ -2998,17 +3035,14 @@ def _is_strict_identity_amend_command(command: str, cwd: str) -> bool:
         and set(git_args) == {"--amend", "--no-edit", "--reset-author"}
     )
 
+
 def _git_transaction_continuation_commands_safe(prompt: str, cwd: str) -> bool:
     for segment in _AUTH_SEGMENT_SPLIT_RE.split(prompt):
         for command in _authorization_command_candidates(segment):
             tokens = _shell_tokens(command)
             executable, args, wrappers = _unwrap_command(tokens)
             if executable == "git":
-                if (
-                    not tokens
-                    or wrappers
-                    or not _trusted_executable_token(tokens[0], "git")
-                ):
+                if not tokens or wrappers or not _trusted_executable_token(tokens[0], "git"):
                     return False
                 _, canonical_args = _git_scope_and_args(args, cwd)
                 subcommand, git_args, dynamic_config = _git_command(canonical_args)
@@ -3034,14 +3068,9 @@ def _git_transaction_continuation_commands_safe(prompt: str, cwd: str) -> bool:
                 return False
     return True
 
-def _git_grant_effective_operations(
-    grant: dict[str, Any], scope_hash: str
-) -> set[str]:
-    operations = {
-        str(item)
-        for item in grant.get("operations") or ()
-        if str(item) in _SCOPED_TRANSACTION_OPERATIONS
-    }
+
+def _git_grant_effective_operations(grant: dict[str, Any], scope_hash: str) -> set[str]:
+    operations = {str(item) for item in grant.get("operations") or () if str(item) in _SCOPED_TRANSACTION_OPERATIONS}
     bindings = grant.get("bindings")
     if not operations or not isinstance(bindings, dict):
         return set()
@@ -3064,14 +3093,11 @@ def _git_grant_effective_operations(
             if operation not in operations:
                 continue
             exact_operations.add(operation)
-            if (
-                item_scope_hash == scope_hash
-                and isinstance(digest, str)
-                and digest
-            ):
+            if item_scope_hash == scope_hash and isinstance(digest, str) and digest:
                 local_exact_operations.add(operation)
 
     return (operations - exact_operations) | local_exact_operations
+
 
 def _git_grant_usable(
     grant: dict[str, Any] | None,
@@ -3096,11 +3122,10 @@ def _git_grant_usable(
     if not isinstance(bindings, dict) or not bindings:
         return False
     return any(
-        _git_grant_effective_operations(grant, scope_hash).difference(
-            set(consumed.get(scope_hash) or [])
-        )
+        _git_grant_effective_operations(grant, scope_hash).difference(set(consumed.get(scope_hash) or []))
         for scope_hash in bindings
     )
+
 
 def _continued_git_grant_from_prompt(
     prompt: str,
@@ -3110,9 +3135,7 @@ def _continued_git_grant_from_prompt(
     prior: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     authorization_text = _git_authorization_text(prompt)
-    expected_session_hash = hashlib.sha256(
-        session_id.encode("utf-8", errors="replace")
-    ).hexdigest()[:16]
+    expected_session_hash = hashlib.sha256(session_id.encode("utf-8", errors="replace")).hexdigest()[:16]
     if (
         not _git_transaction_resume_requested(prompt)
         or not _git_grant_usable(prior, expected_session_hash)
@@ -3143,9 +3166,7 @@ def _continued_git_grant_from_prompt(
             None,
             prior_operations,
         )
-    explicit_scope_hashes = {
-        _scope_hash(scope, exact=True) for scope in explicit_scopes
-    }
+    explicit_scope_hashes = {_scope_hash(scope, exact=True) for scope in explicit_scopes}
     if explicit_scope_hashes and not explicit_scope_hashes.issubset(prior_scope_hashes):
         return None
 
@@ -3183,15 +3204,10 @@ def _continued_git_grant_from_prompt(
     return {
         **prior,
         "turn_id": turn_id,
-        "bindings": {
-            scope_hash: dict(binding)
-            for scope_hash, binding in prior_bindings.items()
-        },
-        "consumed_operations": {
-            scope_hash: list(items)
-            for scope_hash, items in consumed.items()
-        },
+        "bindings": {scope_hash: dict(binding) for scope_hash, binding in prior_bindings.items()},
+        "consumed_operations": {scope_hash: list(items) for scope_hash, items in consumed.items()},
     }
+
 
 def _authorization_command_candidates(segment: str) -> list[str]:
     code_spans = [item.strip() for item in re.findall(r"`([^`\n]+)`", segment) if item.strip()]
@@ -3244,6 +3260,7 @@ def _authorization_command_candidates(segment: str) -> list[str]:
             return [unwrapped]
     return [candidate]
 
+
 def _pure_authorization_command_candidates(segment: str) -> list[str]:
     stripped = segment.strip()
     if not stripped or _COMMAND_NEGATION_RE.search(stripped):
@@ -3256,6 +3273,7 @@ def _pure_authorization_command_candidates(segment: str) -> list[str]:
         return []
     return _authorization_command_candidates(stripped)
 
+
 def _transaction_operation_from_command(command: str, cwd: str) -> str:
     dangerous = _dangerous_codes(_structured_command_findings(command))
     candidate = _scoped_git_candidate(command, cwd, dangerous)
@@ -3263,12 +3281,7 @@ def _transaction_operation_from_command(command: str, cwd: str) -> str:
         return str(candidate.get("operation") or "")
     tokens = _shell_tokens(command)
     executable, args, wrappers = _unwrap_command(tokens)
-    if (
-        tokens
-        and not wrappers
-        and executable == "git"
-        and _trusted_executable_token(tokens[0], "git")
-    ):
+    if tokens and not wrappers and executable == "git" and _trusted_executable_token(tokens[0], "git"):
         _, canonical_args = _git_scope_and_args(args, cwd)
         subcommand, _, _ = _git_command(canonical_args)
         if _is_strict_identity_amend_command(command, cwd):
@@ -3291,17 +3304,13 @@ def _transaction_operation_from_command(command: str, cwd: str) -> str:
     )
     return "repo_create" if candidate else ""
 
+
 def _prompt_has_unresolved_git_scope_override(prompt: str, cwd: str) -> bool:
     for segment in _AUTH_SEGMENT_SPLIT_RE.split(prompt):
         for command in _authorization_command_candidates(segment):
             tokens = _shell_tokens(command)
             executable, args, wrappers = _unwrap_command(tokens)
-            if (
-                executable != "git"
-                or wrappers
-                or not tokens
-                or not _trusted_executable_token(tokens[0], "git")
-            ):
+            if executable != "git" or wrappers or not tokens or not _trusted_executable_token(tokens[0], "git"):
                 continue
             _, canonical_args = _git_scope_and_args(args, cwd)
             subcommand, git_args, _ = _git_command(canonical_args)
@@ -3312,12 +3321,12 @@ def _prompt_has_unresolved_git_scope_override(prompt: str, cwd: str) -> bool:
                 return True
             global_args = canonical_args[:global_arg_count]
             if "--bare" in global_args or any(
-                token in _GIT_SCOPE_FLAGS
-                or any(token.startswith(flag + "=") for flag in _GIT_SCOPE_FLAGS)
+                token in _GIT_SCOPE_FLAGS or any(token.startswith(flag + "=") for flag in _GIT_SCOPE_FLAGS)
                 for token in global_args
             ):
                 return True
     return False
+
 
 def _dangerous_authorization_hashes(
     prompt: str,
@@ -3327,10 +3336,7 @@ def _dangerous_authorization_hashes(
     skip_scoped_candidates: bool = False,
 ) -> dict[str, list[str]]:
     policy = policy_store.load_policy()
-    if (
-        not policy.enable_natural_language_approvals
-        or _AUTHORIZATION_REVOCATION_RE.search(prompt)
-    ):
+    if not policy.enable_natural_language_approvals or _AUTHORIZATION_REVOCATION_RE.search(prompt):
         return {}
     authorized: dict[str, set[str]] = {}
     for clause in _authorization_clauses(prompt, _DANGEROUS_APPROVAL_RE):
@@ -3356,15 +3362,18 @@ def _dangerous_authorization_hashes(
                 authorized.setdefault(code, set()).add(digest)
     return {code: sorted(digests) for code, digests in sorted(authorized.items())}
 
+
 def _explicit_expand(prompt: str) -> bool:
     if _EXPANSION_NEGATED_RE.search(prompt):
         return False
     return bool(_CURRENT_EXPANSION_RE.search(prompt) or _CURRENT_EXPANSION_AUTH_RE.search(prompt))
 
+
 def _nested_allowed(prompt: str) -> bool:
     if _EXPANSION_NEGATED_RE.search(prompt):
         return False
     return bool(_NESTED_AUTH_RE.search(prompt))
+
 
 def _sensitive_context(text: str) -> bool:
     policy = policy_store.load_policy()
@@ -3375,8 +3384,10 @@ def _sensitive_context(text: str) -> bool:
         and _matches_policy_values(text, policy.terms)
     )
 
+
 def _bounded_term_source(term: str) -> str:
     return rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])"
+
 
 def _external_target_scope_from_prompt(text: str) -> tuple[set[str], str | None]:
     mcp_targets: set[str] = set()
@@ -3415,12 +3426,10 @@ def _external_target_scope_from_prompt(text: str) -> tuple[set[str], str | None]
     exact_tool_hash = next(iter(exact_tool_hashes)) if exact_tool_hashes else None
     return mcp_targets | natural_targets, exact_tool_hash
 
+
 def _prompt_target_start_is_delimited(text: str, start: int) -> bool:
-    return bool(
-        start == 0
-        or text[start - 1].isspace()
-        or text[start - 1] in "([{\"'`（【「『"
-    )
+    return bool(start == 0 or text[start - 1].isspace() or text[start - 1] in "([{\"'`（【「『")
+
 
 def _prompt_target_match_is_delimited(text: str, start: int, end: int) -> bool:
     if not _prompt_target_start_is_delimited(text, start):
@@ -3433,6 +3442,7 @@ def _prompt_target_match_is_delimited(text: str, start: int, end: int) -> bool:
     while cursor < len(text) and text[cursor] in _PROMPT_TARGET_TERMINAL_PUNCTUATION:
         cursor += 1
     return cursor == len(text) or text[cursor].isspace()
+
 
 def _external_targets_from_tool_name(tool_name: str) -> set[str]:
     normalized = tool_name.casefold()
@@ -3453,8 +3463,10 @@ def _external_targets_from_tool_name(tool_name: str) -> set[str]:
             return {target}
     return set()
 
+
 def _policy_value_hash(value: str) -> str:
     return hashlib.sha256(value.casefold().encode("utf-8", errors="replace")).hexdigest()
+
 
 def _matching_grant_term_hashes(text: str) -> set[str]:
     matched: set[str] = set()
@@ -3471,20 +3483,12 @@ def _matching_grant_term_hashes(text: str) -> set[str]:
         matched.add(_policy_value_hash(term))
     return matched
 
+
 def _sensitive_disclosure_grant(prompt: str, turn_id: str) -> dict[str, Any] | None:
     policy = policy_store.load_policy()
-    if (
-        not policy.enable_sensitive_disclosure_approvals
-        or not policy.markers
-        or not policy.terms
-        or not turn_id
-    ):
+    if not policy.enable_sensitive_disclosure_approvals or not policy.markers or not policy.terms or not turn_id:
         return None
-    sentences = [
-        item.strip()
-        for item in re.split(r"(?:[。！？；]+|[!?;]+(?=\s|$)|\n+)", prompt)
-        if item.strip()
-    ]
+    sentences = [item.strip() for item in re.split(r"(?:[。！？；]+|[!?;]+(?=\s|$)|\n+)", prompt) if item.strip()]
     if any(_SENSITIVE_NEGATION_RE.search(item) and _SENSITIVE_EXTERNAL_VERB_RE.search(item) for item in sentences):
         return None
     for item in sentences:
@@ -3509,6 +3513,7 @@ def _sensitive_disclosure_grant(prompt: str, turn_id: str) -> dict[str, Any] | N
             return grant
     return None
 
+
 def _sed_delimited_end(text: str, start: int, delimiter: str) -> int | None:
     escaped = False
     for index in range(start, len(text)):
@@ -3522,6 +3527,7 @@ def _sed_delimited_end(text: str, start: int, delimiter: str) -> int | None:
         if character == delimiter:
             return index
     return None
+
 
 def _sed_command_body(script: str) -> str | None:
     text = script.strip()
@@ -3568,6 +3574,7 @@ def _sed_command_body(script: str) -> str | None:
     body = text[position:].lstrip()
     return body or None
 
+
 def _sed_substitution_is_read_only(body: str) -> bool:
     if len(body) < 4 or body[0] != "s":
         return False
@@ -3583,6 +3590,7 @@ def _sed_substitution_is_read_only(body: str) -> bool:
     flags = body[replacement_end + 1 :].strip()
     return bool(re.fullmatch(r"(?:[gIpPmM]|[1-9][0-9]*)*", flags))
 
+
 def _sed_script_is_strictly_read_only(script: str) -> bool:
     body = _sed_command_body(script)
     if not body:
@@ -3594,6 +3602,7 @@ def _sed_script_is_strictly_read_only(script: str) -> bool:
     if body[0] in {"q", "Q"}:
         return not body[1:].strip() or bool(re.fullmatch(r"\s*[0-9]+", body[1:]))
     return False
+
 
 def _sed_is_strictly_read_only(args: list[str]) -> bool:
     scripts: list[str] = []
@@ -3608,9 +3617,7 @@ def _sed_is_strictly_read_only(args: list[str]) -> bool:
             index += 1
             continue
         if options_active and token.startswith("--"):
-            if token in {"--file", "--in-place"} or token.startswith(
-                ("--file=", "--in-place=")
-            ):
+            if token in {"--file", "--in-place"} or token.startswith(("--file=", "--in-place=")):
                 return False
             if token in {"--expression"}:
                 index += 1
@@ -3663,6 +3670,7 @@ def _sed_is_strictly_read_only(args: list[str]) -> bool:
         index += 1
     return bool(scripts) and all(_sed_script_is_strictly_read_only(script) for script in scripts)
 
+
 def _is_strictly_read_only_command(command: str) -> bool:
     if not command.strip() or _SHELL_CONTROL_RE.search(command) or _has_shell_indirection(command):
         return False
@@ -3677,8 +3685,7 @@ def _is_strictly_read_only_command(command: str) -> bool:
     if executable == "git":
         subcommand, git_args, dynamic_config = _git_command(args)
         scope_override = any(
-            token in _GIT_SCOPE_FLAGS
-            or any(token.startswith(prefix + "=") for prefix in _GIT_SCOPE_FLAGS)
+            token in _GIT_SCOPE_FLAGS or any(token.startswith(prefix + "=") for prefix in _GIT_SCOPE_FLAGS)
             for token in args
         )
         external_helper = any(token == "--exec-path" or token.startswith("--exec-path=") for token in args)
@@ -3686,6 +3693,7 @@ def _is_strictly_read_only_command(command: str) -> bool:
     if executable == "sed":
         return _sed_is_strictly_read_only(args)
     return executable in _READ_ONLY_COMMANDS
+
 
 def _context(event_name: str, message: str, *, system_message: str | None = None) -> dict[str, Any]:
     output: dict[str, Any] = {
@@ -3698,10 +3706,11 @@ def _context(event_name: str, message: str, *, system_message: str | None = None
         output["systemMessage"] = system_message
     return output
 
+
 def handle_user_prompt_submit(event: dict[str, Any]) -> dict[str, Any]:
     prompt = str(event.get("prompt") or "")
     cwd = str(event.get("cwd") or ".")
-    if _secret_found(_scan_text(prompt, source="user_prompt")):
+    if _secret_found(_scan_text(prompt)):
         return {
             "decision": "block",
             "reason": "Potential credential detected in the prompt. Redact it before sending.",
@@ -3713,6 +3722,7 @@ def handle_user_prompt_submit(event: dict[str, Any]) -> dict[str, Any]:
     nested = _nested_allowed(prompt)
     sensitive = _sensitive_context(prompt)
     disclosure_grant = _sensitive_disclosure_grant(prompt, turn_id)
+
     def mutate(state: dict[str, Any]) -> None:
         pending = state.get("pending_local_git")
         prior_grant = state.get("local_git_grant")
@@ -3743,8 +3753,7 @@ def handle_user_prompt_submit(event: dict[str, Any]) -> dict[str, Any]:
         )
         transaction_targets = _prompt_github_targets(authorization_text)
         declared_clone_roots = tuple(
-            candidate["destination"]
-            for candidate in _prompt_clone_candidates(authorization_text, cwd)
+            candidate["destination"] for candidate in _prompt_clone_candidates(authorization_text, cwd)
         )
         transaction_intent_requires_grant = bool(
             transaction_targets
@@ -3760,14 +3769,8 @@ def handle_user_prompt_submit(event: dict[str, Any]) -> dict[str, Any]:
         authorization_hashes = _dangerous_authorization_hashes(
             prompt,
             cwd,
-            tuple(
-                _ordered_unique(
-                    [*_tracked_clone_roots(state), *declared_clone_roots]
-                )
-            ),
-            skip_scoped_candidates=(
-                grant is not None or transaction_intent_requires_grant
-            ),
+            tuple(_ordered_unique([*_tracked_clone_roots(state), *declared_clone_roots])),
+            skip_scoped_candidates=(grant is not None or transaction_intent_requires_grant),
         )
         state["current_turn_id"] = turn_id
         state["explicit_expand"] = expand
@@ -3780,13 +3783,12 @@ def handle_user_prompt_submit(event: dict[str, Any]) -> dict[str, Any]:
         state["local_git_grant"] = grant
         if grant is not None:
             state["pending_local_git"] = None
-        elif _AUTHORIZATION_REVOCATION_RE.search(prompt) or _AUTH_NEGATED_RE.search(
-            authorization_text
-        ) or (
-            isinstance(pending, dict)
-            and (
-                not _pending_git_usable(pending)
-                or not _PENDING_COMMAND_REFERENCE_RE.search(prompt)
+        elif (
+            _AUTHORIZATION_REVOCATION_RE.search(prompt)
+            or _AUTH_NEGATED_RE.search(authorization_text)
+            or (
+                isinstance(pending, dict)
+                and (not _pending_git_usable(pending) or not _PENDING_COMMAND_REFERENCE_RE.search(prompt))
             )
         ):
             state["pending_local_git"] = None

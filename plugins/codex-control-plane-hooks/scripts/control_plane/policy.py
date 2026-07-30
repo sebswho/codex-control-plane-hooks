@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import event_context
+
 MAX_POLICY_BYTES = 64_000
 
 
@@ -38,7 +40,7 @@ def _absolute_path(value: str, name: str) -> Path:
     return path
 
 
-def _private_data_dir() -> Path:
+def _resolve_private_data_dir() -> Path:
     configured = os.environ.get("PLUGIN_DATA")
     if configured:
         path = _absolute_path(configured, "PLUGIN_DATA")
@@ -46,11 +48,7 @@ def _private_data_dir() -> Path:
         if os.name == "nt":
             raise RuntimeError("PLUGIN_DATA is required on Windows")
         state_home = os.environ.get("XDG_STATE_HOME")
-        base = (
-            _absolute_path(state_home, "XDG_STATE_HOME")
-            if state_home
-            else Path.home() / ".local" / "state"
-        )
+        base = _absolute_path(state_home, "XDG_STATE_HOME") if state_home else Path.home() / ".local" / "state"
         path = base / "codex-control-plane-hooks"
 
     if path.exists() and path.is_symlink():
@@ -66,29 +64,25 @@ def _private_data_dir() -> Path:
     return path
 
 
+def _private_data_dir() -> Path:
+    return event_context.data_dir(_resolve_private_data_dir)
+
+
 def _policy_path() -> Path:
     configured = os.environ.get("CONTROL_PLANE_POLICY")
     if configured and os.name == "nt":
         raise RuntimeError("Windows policy must use PLUGIN_DATA/policy.json")
-    return (
-        _absolute_path(configured, "CONTROL_PLANE_POLICY")
-        if configured
-        else _private_data_dir() / "policy.json"
-    )
+    return _absolute_path(configured, "CONTROL_PLANE_POLICY") if configured else _private_data_dir() / "policy.json"
 
 
 def _values(raw: dict[str, Any], key: str) -> tuple[str, ...]:
     values = raw.get(key, [])
     if not isinstance(values, list):
         return ()
-    return tuple(
-        item.strip()
-        for item in values[:100]
-        if isinstance(item, str) and item.strip()
-    )
+    return tuple(item.strip() for item in values[:100] if isinstance(item, str) and item.strip())
 
 
-def load_policy() -> PolicyView:
+def _load_policy_uncached() -> PolicyView:
     """Load the configured policy or return the immutable default policy."""
 
     path = _policy_path()
@@ -107,9 +101,7 @@ def load_policy() -> PolicyView:
     if os.name != "nt" and hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise PermissionError("policy file is owned by another user")
     if explicitly_configured and os.name != "nt" and info.st_mode & 0o077:
-        raise PermissionError(
-            "external policy file must not be accessible by group or others"
-        )
+        raise PermissionError("external policy file must not be accessible by group or others")
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -122,16 +114,14 @@ def load_policy() -> PolicyView:
         markers=_values(raw, "sensitive_markers"),
         terms=_values(raw, "sensitive_terms"),
         durable_markers=_values(raw, "durable_destination_markers"),
-        enable_natural_language_approvals=(
-            raw.get("enable_natural_language_approvals") is True
-        ),
-        enable_sensitive_disclosure_approvals=(
-            raw.get("enable_sensitive_disclosure_approvals") is True
-        ),
-        enable_scoped_git_transactions=(
-            raw.get("enable_scoped_git_transactions") is True
-        ),
-        enable_constrained_github_clone=(
-            raw.get("enable_constrained_github_clone") is True
-        ),
+        enable_natural_language_approvals=(raw.get("enable_natural_language_approvals") is True),
+        enable_sensitive_disclosure_approvals=(raw.get("enable_sensitive_disclosure_approvals") is True),
+        enable_scoped_git_transactions=(raw.get("enable_scoped_git_transactions") is True),
+        enable_constrained_github_clone=(raw.get("enable_constrained_github_clone") is True),
     )
+
+
+def load_policy() -> PolicyView:
+    """Load at most one immutable policy view per dispatched event."""
+
+    return event_context.policy(_load_policy_uncached)
