@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from . import event_context
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - unavailable on native Windows.
@@ -55,9 +57,7 @@ def mutate_session(session_id: str, mutator: _SessionMutator) -> _SessionSnapsho
             _unlock_state(lock, lock_backend)
 
 
-def cleanup_session(
-    session_id: str, remove_predicate: _RemovePredicate
-) -> _SessionSnapshot:
+def cleanup_session(session_id: str, remove_predicate: _RemovePredicate) -> _SessionSnapshot:
     """Return a snapshot and remove its file only when the predicate returns true.
 
     The predicate is evaluated while holding the session lock. Returning ``False``
@@ -77,19 +77,19 @@ def cleanup_session(
             _unlock_state(lock, lock_backend)
 
 
-def _data_dir() -> Path:
+def _resolve_data_dir() -> Path:
     configured = os.environ.get("PLUGIN_DATA")
     if configured:
         return _private_directory(_absolute_configured_path(configured, "PLUGIN_DATA"))
     if os.name == "nt":
         raise RuntimeError("PLUGIN_DATA is required on Windows")
     state_home = os.environ.get("XDG_STATE_HOME")
-    base = (
-        _absolute_configured_path(state_home, "XDG_STATE_HOME")
-        if state_home
-        else Path.home() / ".local" / "state"
-    )
+    base = _absolute_configured_path(state_home, "XDG_STATE_HOME") if state_home else Path.home() / ".local" / "state"
     return _private_directory(base / "codex-control-plane-hooks")
+
+
+def _data_dir() -> Path:
+    return event_context.data_dir(_resolve_data_dir)
 
 
 def _absolute_configured_path(value: str, name: str) -> Path:
@@ -167,9 +167,7 @@ def _load(path: Path, session_id: str) -> _SessionSnapshot:
     return normalized
 
 
-def _open_private(
-    path: Path, flags: int, mode: int = 0o600, *, binary: bool = False
-):
+def _open_private(path: Path, flags: int, mode: int = 0o600, *, binary: bool = False):
     if path.exists() and path.is_symlink():
         raise RuntimeError(f"refusing symlinked state file: {path}")
     nofollow = getattr(os, "O_NOFOLLOW", 0)
@@ -193,7 +191,10 @@ def _open_private(
 
 
 def _lock_state(stream) -> str:
-    deadline = time.monotonic() + 5.0
+    timeout = event_context.remaining_seconds(5.0)
+    if timeout <= 0:
+        raise TimeoutError("event budget exhausted before acquiring the state lock")
+    deadline = time.monotonic() + timeout
     if fcntl is not None:
         while True:
             try:
@@ -243,9 +244,7 @@ def _write_atomic(path: Path, state: _SessionSnapshot) -> None:
     temp = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     try:
         with _open_private(temp, os.O_RDWR | os.O_CREAT | os.O_EXCL) as stream:
-            stream.write(
-                json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-            )
+            stream.write(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temp, path)
@@ -277,8 +276,7 @@ def _validate_state_fields(state: _SessionSnapshot) -> None:
 
     active_agents = state.get("active_agents", {})
     if not isinstance(active_agents, dict) or not all(
-        isinstance(agent_id, str) and isinstance(metadata, dict)
-        for agent_id, metadata in active_agents.items()
+        isinstance(agent_id, str) and isinstance(metadata, dict) for agent_id, metadata in active_agents.items()
     ):
         raise RuntimeError("state field has invalid type: active_agents")
 
@@ -290,27 +288,21 @@ def _validate_state_fields(state: _SessionSnapshot) -> None:
 
     dangerous_hashes = state.get("dangerous_authorization_hashes", {})
     if not isinstance(dangerous_hashes, dict) or not all(
-        isinstance(code, str)
-        and isinstance(digests, list)
-        and all(isinstance(digest, str) for digest in digests)
+        isinstance(code, str) and isinstance(digests, list) and all(isinstance(digest, str) for digest in digests)
         for code, digests in dangerous_hashes.items()
     ):
         raise RuntimeError("state field has invalid type: dangerous_authorization_hashes")
 
     pending_permissions = state.get("pending_permission_authorizations", {})
     if not isinstance(pending_permissions, dict) or not all(
-        isinstance(tool_id, str) and isinstance(metadata, dict)
-        for tool_id, metadata in pending_permissions.items()
+        isinstance(tool_id, str) and isinstance(metadata, dict) for tool_id, metadata in pending_permissions.items()
     ):
-        raise RuntimeError(
-            "state field has invalid type: pending_permission_authorizations"
-        )
+        raise RuntimeError("state field has invalid type: pending_permission_authorizations")
 
     for key in ("pending_constrained_clones", "untrusted_clone_roots"):
         records = state.get(key, {})
         if not isinstance(records, dict) or not all(
-            isinstance(record_id, str) and isinstance(metadata, dict)
-            for record_id, metadata in records.items()
+            isinstance(record_id, str) and isinstance(metadata, dict) for record_id, metadata in records.items()
         ):
             raise RuntimeError(f"state field has invalid type: {key}")
 
@@ -319,20 +311,14 @@ def _validate_state_fields(state: _SessionSnapshot) -> None:
             raise RuntimeError(f"state field has invalid type: {key}")
 
     compaction_count = state.get("compaction_count", 0)
-    if (
-        not isinstance(compaction_count, int)
-        or isinstance(compaction_count, bool)
-        or compaction_count < 0
-    ):
+    if not isinstance(compaction_count, int) or isinstance(compaction_count, bool) or compaction_count < 0:
         raise RuntimeError("state field has invalid type: compaction_count")
 
 
 def _default_state(session_id: str) -> _SessionSnapshot:
     return {
         "schema_version": _STATE_SCHEMA_VERSION,
-        "session_hash": hashlib.sha256(
-            session_id.encode("utf-8", errors="replace")
-        ).hexdigest()[:16],
+        "session_hash": hashlib.sha256(session_id.encode("utf-8", errors="replace")).hexdigest()[:16],
         "current_turn_id": "",
         "active_agents": {},
         "explicit_expand": False,

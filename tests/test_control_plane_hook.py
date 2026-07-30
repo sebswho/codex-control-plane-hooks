@@ -22,6 +22,11 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "plugins" / "codex-control-plane
 sys.path.insert(0, str(SCRIPTS))
 SCRIPT = SCRIPTS / "control_plane_hook.py"
 DEFAULT_CWD = tempfile.gettempdir()
+LINUX_HOME_FIXTURE = "/" + "home" + "/example"
+MACOS_HOME_FIXTURE = "/" + "Users" + "/example"
+WINDOWS_HOME_FIXTURE = "C:\\\\" + "Users" + r"\example"
+WINDOWS_HOME_WITH_SPACE_FIXTURE = "C:\\\\" + "Users" + r"\Example User"
+WINDOWS_SLASH_HOME_FIXTURE = "C:/" + "Users" + "/example"
 
 from control_plane import state as state_store  # noqa: E402
 
@@ -29,13 +34,7 @@ from control_plane import state as state_store  # noqa: E402
 class HookProtocolTests(unittest.TestCase):
     @staticmethod
     def cleanup_owned_runtime_version(path: Path, marker: Path, token: str) -> None:
-        versions_root = (
-            Path.home()
-            / ".codex"
-            / "runtimes"
-            / "codex-control-plane-hooks"
-            / "versions"
-        )
+        versions_root = Path.home() / ".codex" / "runtimes" / "codex-control-plane-hooks" / "versions"
         runtime_id = path.name
         safe_id = (
             runtime_id.startswith("py312-")
@@ -61,9 +60,11 @@ class HookProtocolTests(unittest.TestCase):
         previous_plugin_data = os.environ.get("PLUGIN_DATA")
         os.environ["PLUGIN_DATA"] = self.data_dir
         self.addCleanup(
-            lambda: os.environ.__setitem__("PLUGIN_DATA", previous_plugin_data)
-            if previous_plugin_data is not None
-            else os.environ.pop("PLUGIN_DATA", None)
+            lambda: (
+                os.environ.__setitem__("PLUGIN_DATA", previous_plugin_data)
+                if previous_plugin_data is not None
+                else os.environ.pop("PLUGIN_DATA", None)
+            )
         )
         Path(self.data_dir, "policy.json").write_text(
             json.dumps(
@@ -141,24 +142,14 @@ class HookProtocolTests(unittest.TestCase):
         powershell = system32 / "WindowsPowerShell" / "v1.0" / "powershell.exe"
         root = Path(tempfile.mkdtemp(prefix="launcher-", dir=self.temp.name))
         plugin_root = root / "plugin with spaces"
-        plugin_data = (
-            root
-            / "codex home with spaces"
-            / "plugins"
-            / "data"
-            / "codex-control-plane-hooks"
-        )
+        plugin_data = root / "codex home with spaces" / "plugins" / "data" / "codex-control-plane-hooks"
         plugin_root.mkdir()
         plugin_data.mkdir(parents=True)
         launcher = plugin_root / "run_control_plane_hook.ps1"
         shutil.copyfile(SCRIPTS / launcher.name, launcher)
-        (plugin_root / "control_plane_hook.py").write_text(
-            hook_source, encoding="utf-8"
-        )
+        (plugin_root / "control_plane_hook.py").write_text(hook_source, encoding="utf-8")
         if manifest_text is not None:
-            (plugin_data / "runtime.json").write_text(
-                manifest_text, encoding="utf-8"
-            )
+            (plugin_data / "runtime.json").write_text(manifest_text, encoding="utf-8")
         if manifest_bytes is not None:
             self.assertIsNone(manifest_text)
             (plugin_data / "runtime.json").write_bytes(manifest_bytes)
@@ -174,13 +165,7 @@ class HookProtocolTests(unittest.TestCase):
             )
             self.assertEqual(0, source_setup.returncode, source_setup.stderr)
             source_python = source_runtime / "Scripts" / "python.exe"
-            runtime_root = (
-                Path.home()
-                / ".codex"
-                / "runtimes"
-                / "codex-control-plane-hooks"
-                / "versions"
-            )
+            runtime_root = Path.home() / ".codex" / "runtimes" / "codex-control-plane-hooks" / "versions"
             runtime_root.mkdir(parents=True, exist_ok=True)
             setup = subprocess.run(
                 [
@@ -203,9 +188,7 @@ class HookProtocolTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(0, setup.returncode, setup.stderr)
-            manifest = json.loads(
-                (plugin_data / "runtime.json").read_text(encoding="utf-8")
-            )
+            manifest = json.loads((plugin_data / "runtime.json").read_text(encoding="utf-8"))
             created = Path(manifest["interpreter"]).parents[1]
             self.assertEqual(runtime_root, created.parent)
             ownership_token = os.urandom(16).hex()
@@ -222,9 +205,7 @@ class HookProtocolTests(unittest.TestCase):
             before_launch(plugin_data)
         environment = os.environ.copy()
         environment["PLUGIN_DATA"] = str(plugin_data)
-        environment["PATH"] = os.pathsep.join(
-            [str(system32)]
-        )
+        environment["PATH"] = os.pathsep.join([str(system32)])
         completed = subprocess.run(
             [
                 str(launcher_shell or powershell),
@@ -274,9 +255,7 @@ class HookProtocolTests(unittest.TestCase):
             ],
             check=True,
         )
-        subprocess.run(
-            ["git", "-C", str(repo), "branch", "-M", branch], check=True
-        )
+        subprocess.run(["git", "-C", str(repo), "branch", "-M", branch], check=True)
         return subprocess.run(
             ["git", "-C", str(repo), "rev-parse", "HEAD"],
             text=True,
@@ -290,9 +269,7 @@ class HookProtocolTests(unittest.TestCase):
         policy.update(updates)
         path.write_text(json.dumps(policy), encoding="utf-8")
 
-    def prepare_publication_grant(
-        self, name: str
-    ) -> tuple[Path, Path, str, Path]:
+    def prepare_publication_grant(self, name: str) -> tuple[Path, Path, str, Path]:
         root = Path(self.data_dir) / f"publication-{name}"
         repo = root / name
         repo.mkdir(parents=True)
@@ -310,8 +287,7 @@ class HookProtocolTests(unittest.TestCase):
             stderr=subprocess.DEVNULL,
         )
         self.prompt(
-            f"允许在 {repo} 执行 git init/add/commit，并在 fixture-owner 下创建 "
-            f"{name} private repository，推送 main。",
+            f"允许在 {repo} 执行 git init/add/commit，并在 fixture-owner 下创建 {name} private repository，推送 main。",
             cwd=str(root),
         )
         digest = hashlib.sha256(self.session.encode("utf-8")).hexdigest()[:24]
@@ -337,11 +313,7 @@ class HookProtocolTests(unittest.TestCase):
     ) -> dict:
         self.tool_sequence += 1
         tool_use_id = f"transaction-probe-{self.tool_sequence}"
-        tool_input = (
-            {"cmd": command, "workdir": cwd}
-            if tool_name == "exec_command"
-            else {"command": command}
-        )
+        tool_input = {"cmd": command, "workdir": cwd} if tool_name == "exec_command" else {"command": command}
         result = self.run_hook(
             {
                 "hook_event_name": "PreToolUse",
@@ -377,18 +349,12 @@ class HookProtocolTests(unittest.TestCase):
                 },
             )
             current["local_git_grant"] = (
-                grant
-                if module._git_grant_usable(
-                    grant, str(current.get("session_hash") or "")
-                )
-                else None
+                grant if module._git_grant_usable(grant, str(current.get("session_hash") or "")) else None
             )
 
         state_store.mutate_session(self.session, complete_probe)
         if runner_id:
-            module._unlink_owned_regular(
-                Path(self.data_dir) / f".git-runner-request-{runner_id}.json"
-            )
+            module._unlink_owned_regular(Path(self.data_dir) / f".git-runner-request-{runner_id}.json")
         return result
 
     def run_transaction_command(
@@ -408,9 +374,7 @@ class HookProtocolTests(unittest.TestCase):
         command_key = "cmd" if "cmd" in rewritten_input else "command"
         rewritten_input[command_key] = runner_command
         rewritten_event["tool_input"] = rewritten_input
-        permission = self.run_hook(
-            {"hook_event_name": "PermissionRequest", **rewritten_event}
-        )
+        permission = self.run_hook({"hook_event_name": "PermissionRequest", **rewritten_event})
         self.assertNotEqual(
             "deny",
             permission["hookSpecificOutput"]["decision"].get("behavior"),
@@ -586,11 +550,7 @@ class HookProtocolTests(unittest.TestCase):
     def test_windows_quoted_caret_is_literal(self) -> None:
         module = __import__("control_plane_hook")
         with mock.patch.object(module, "_looks_like_windows_command", return_value=True):
-            self.assertFalse(
-                module._has_shell_indirection(
-                    "git config --get-regexp '^remote\\..*\\.url$'"
-                )
-            )
+            self.assertFalse(module._has_shell_indirection("git config --get-regexp '^remote\\..*\\.url$'"))
             self.assertTrue(module._has_shell_indirection("echo ^& whoami"))
 
     def test_powershell_command_mode_allows_safe_content_and_scans_inner_command(self) -> None:
@@ -666,9 +626,7 @@ class HookProtocolTests(unittest.TestCase):
         ]
         for command in commands:
             with self.subTest(command=command):
-                codes = {
-                    item["code"] for item in module._structured_command_findings(command)
-                }
+                codes = {item["code"] for item in module._structured_command_findings(command)}
                 self.assertIn("background_process", codes)
                 self.assertIn("privilege_escalation", codes)
 
@@ -704,19 +662,14 @@ class HookProtocolTests(unittest.TestCase):
     def test_powershell_call_operator_preserves_safe_windows_invocation(self) -> None:
         command = r'& "C:\Program Files\Git\bin\git.exe" status --short'
         self.assertEqual({}, self.bash(command))
-        self.assertEqual(
-            {}, self.bash(r'& "C:\Program Files (x86)\Git\bin\git.exe" status --short')
-        )
+        self.assertEqual({}, self.bash(r'& "C:\Program Files (x86)\Git\bin\git.exe" status --short'))
         self.assertEqual({}, self.bash("& Get-ChildItem"))
 
         module = __import__("control_plane_hook")
         with mock.patch.object(module, "_looks_like_windows_command", return_value=True):
             for bare_target in ["& Invoke-Build", "& SomeFunction"]:
                 with self.subTest(windows_bare_target=bare_target):
-                    codes = {
-                        item["code"]
-                        for item in module._structured_command_findings(bare_target)
-                    }
+                    codes = {item["code"] for item in module._structured_command_findings(bare_target)}
                     self.assertIn("background_process", codes)
 
         for composed in [
@@ -763,9 +716,7 @@ class HookProtocolTests(unittest.TestCase):
         prompt = f'批准在 "{scope}" 执行 git.exe add 和 git.exe commit。'
         self.assertEqual(
             [module._scope_identity(scope)],
-            module._prompt_git_scopes(
-                prompt, DEFAULT_CWD, None, {"add", "commit"}
-            ),
+            module._prompt_git_scopes(prompt, DEFAULT_CWD, None, {"add", "commit"}),
         )
 
     def test_quoted_windows_executable_authorization_preserves_spaces(self) -> None:
@@ -780,9 +731,7 @@ class HookProtocolTests(unittest.TestCase):
         ]
         for variant in variants:
             with self.subTest(command=variant):
-                self.assertEqual(
-                    [variant], module._authorization_command_candidates(f"允许执行 {variant}")
-                )
+                self.assertEqual([variant], module._authorization_command_candidates(f"允许执行 {variant}"))
 
         self.prompt(f"允许执行 {command}。")
         first = self.bash(command)
@@ -925,8 +874,9 @@ class HookProtocolTests(unittest.TestCase):
         fake_fcntl.LOCK_EX = 1
         fake_fcntl.LOCK_NB = 2
         fake_fcntl.flock.side_effect = BlockingIOError
-        with mock.patch.object(state_store, "fcntl", fake_fcntl), mock.patch.object(
-            state_store.time, "monotonic", side_effect=[0.0, 6.0]
+        with (
+            mock.patch.object(state_store, "fcntl", fake_fcntl),
+            mock.patch.object(state_store.time, "monotonic", side_effect=[0.0, 6.0]),
         ):
             with self.assertRaises(TimeoutError):
                 state_store.read_session(self.session)
@@ -1134,9 +1084,7 @@ class HookProtocolTests(unittest.TestCase):
                     policy.pop(flag)
                 else:
                     policy[flag] = value
-                Path(data_dir, "policy.json").write_text(
-                    json.dumps(policy), encoding="utf-8"
-                )
+                Path(data_dir, "policy.json").write_text(json.dumps(policy), encoding="utf-8")
                 workspace = Path(data_dir) / "workspace"
                 workspace.mkdir()
                 if flag == "enable_scoped_git_transactions":
@@ -1173,25 +1121,15 @@ class HookProtocolTests(unittest.TestCase):
                         },
                         data_dir=data_dir,
                     )
-                self.assertEqual(
-                    "deny", result["hookSpecificOutput"]["permissionDecision"]
-                )
+                self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
 
     def test_public_plugin_version_remains_v0_2_6(self) -> None:
-        manifest = json.loads(
-            (SCRIPTS.parent / ".codex-plugin" / "plugin.json").read_text(
-                encoding="utf-8"
-            )
-        )
+        manifest = json.loads((SCRIPTS.parent / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
         self.assertEqual("0.2.6", manifest["version"])
 
     def test_windows_launcher_is_manifest_only(self) -> None:
-        powershell_launcher = (
-            SCRIPTS / "run_control_plane_hook.ps1"
-        ).read_text(encoding="utf-8")
-        cmd_shim = (SCRIPTS / "run_control_plane_hook.cmd").read_text(
-            encoding="utf-8"
-        )
+        powershell_launcher = (SCRIPTS / "run_control_plane_hook.ps1").read_text(encoding="utf-8")
+        cmd_shim = (SCRIPTS / "run_control_plane_hook.cmd").read_text(encoding="utf-8")
         hooks = json.loads((SCRIPTS.parent / "hooks" / "hooks.json").read_text())
         self.assertIn('Join-Path $pluginData "runtime.json"', powershell_launcher)
         self.assertIn("[Environment]::GetFolderPath", powershell_launcher)
@@ -1204,20 +1142,15 @@ class HookProtocolTests(unittest.TestCase):
         self.assertNotIn("ReadToEnd", powershell_launcher)
         self.assertIn('set "ERRORLEVEL="', cmd_shim)
         self.assertIn(
-            r'%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe',
+            r"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe",
             cmd_shim,
         )
         self.assertIn("run_control_plane_hook.ps1", cmd_shim)
         commands = [
-            hook["commandWindows"]
-            for groups in hooks["hooks"].values()
-            for group in groups
-            for hook in group["hooks"]
+            hook["commandWindows"] for groups in hooks["hooks"].values() for group in groups for hook in group["hooks"]
         ]
         self.assertTrue(commands)
-        self.assertTrue(
-            all(command.endswith("run_control_plane_hook.ps1\"") for command in commands)
-        )
+        self.assertTrue(all(command.endswith('run_control_plane_hook.ps1"') for command in commands))
 
     def test_windows_transaction_runner_rejects_non_powershell_overrides(self) -> None:
         module = __import__("control_plane_hook")
@@ -1225,22 +1158,16 @@ class HookProtocolTests(unittest.TestCase):
             for shell in ("cmd", "cmd.exe", "bash", "bash.exe", "sh", "sh.exe"):
                 with self.subTest(shell=shell):
                     with self.assertRaisesRegex(RuntimeError, "requires PowerShell"):
-                        module._git_runner_shell_kind(
-                            "exec_command", {"shell": shell}
-                        )
+                        module._git_runner_shell_kind("exec_command", {"shell": shell})
             self.assertEqual(
                 "powershell",
-                module._git_runner_shell_kind(
-                    "exec_command", {"shell": "pwsh"}
-                ),
+                module._git_runner_shell_kind("exec_command", {"shell": "pwsh"}),
             )
             for shell in ("powershell", "powershell.exe", "pwsh", "pwsh.exe"):
                 with self.subTest(shell=shell):
                     self.assertEqual(
                         "powershell",
-                        module._git_runner_shell_kind(
-                            "exec_command", {"shell": shell}
-                        ),
+                        module._git_runner_shell_kind("exec_command", {"shell": shell}),
                     )
         rendered = module._render_git_runner_command(
             [r"C:\Program Files\Python\python.exe", "arg with spaces", "雪"],
@@ -1283,25 +1210,17 @@ class HookProtocolTests(unittest.TestCase):
                         "cwd": self.data_dir,
                     }
                 )
-                self.assertEqual(
-                    "deny", denied["hookSpecificOutput"]["permissionDecision"]
-                )
+                self.assertEqual("deny", denied["hookSpecificOutput"]["permissionDecision"])
                 state_path = next(
-                    Path(self.data_dir).glob(
-                        f"session-{hashlib.sha256(self.session.encode()).hexdigest()[:24]}.json"
-                    )
+                    Path(self.data_dir).glob(f"session-{hashlib.sha256(self.session.encode()).hexdigest()[:24]}.json")
                 )
                 state = json.loads(state_path.read_text(encoding="utf-8"))
                 self.assertEqual({}, state["pending_permission_authorizations"])
-                self.assertEqual(
-                    [], list(Path(self.data_dir).glob(".git-runner-request-*.json"))
-                )
+                self.assertEqual([], list(Path(self.data_dir).glob(".git-runner-request-*.json")))
 
     @unittest.skipUnless(os.name == "nt", "Windows launcher runtime test")
     def test_windows_launcher_missing_manifest_never_falls_back_to_path(self) -> None:
-        completed, plugin_data = self.run_windows_launcher_fixture(
-            manifest_text=None
-        )
+        completed, plugin_data = self.run_windows_launcher_fixture(manifest_text=None)
 
         self.assertEqual(127, completed.returncode, completed.stderr)
         self.assertEqual("", completed.stdout)
@@ -1332,9 +1251,7 @@ class HookProtocolTests(unittest.TestCase):
         cases = {
             "root array": "[]",
             "unsupported schema": json.dumps({**valid_fields, "schema_version": 2}),
-            "missing field": json.dumps(
-                {key: value for key, value in valid_fields.items() if key != "interpreter"}
-            ),
+            "missing field": json.dumps({key: value for key, value in valid_fields.items() if key != "interpreter"}),
             "unknown field": json.dumps({**valid_fields, "extra": True}),
             "wrong field type": json.dumps({**valid_fields, "interpreter": 12}),
             "duplicate field": (
@@ -1431,13 +1348,9 @@ class HookProtocolTests(unittest.TestCase):
     )
     def test_windows_launcher_rejects_a_reparse_point_in_runtime_path(self) -> None:
         def replace_runtime_version_with_junction(plugin_data: Path) -> None:
-            manifest = json.loads(
-                (plugin_data / "runtime.json").read_text(encoding="utf-8")
-            )
+            manifest = json.loads((plugin_data / "runtime.json").read_text(encoding="utf-8"))
             version_directory = Path(manifest["interpreter"]).parents[1]
-            junction_target = (
-                Path(self.temp.name) / f"moved runtime {version_directory.name}"
-            )
+            junction_target = Path(self.temp.name) / f"moved runtime {version_directory.name}"
             shutil.move(version_directory, junction_target)
             comspec = os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")
             linked = subprocess.run(
@@ -1473,14 +1386,9 @@ class HookProtocolTests(unittest.TestCase):
     )
     def test_windows_launcher_rejects_a_reparse_point_at_scripts(self) -> None:
         def replace_scripts_with_junction(plugin_data: Path) -> None:
-            manifest = json.loads(
-                (plugin_data / "runtime.json").read_text(encoding="utf-8")
-            )
+            manifest = json.loads((plugin_data / "runtime.json").read_text(encoding="utf-8"))
             scripts_directory = Path(manifest["interpreter"]).parent
-            junction_target = (
-                Path(self.temp.name)
-                / f"moved scripts {scripts_directory.parent.name}"
-            )
+            junction_target = Path(self.temp.name) / f"moved scripts {scripts_directory.parent.name}"
             shutil.move(scripts_directory, junction_target)
             comspec = os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")
             linked = subprocess.run(
@@ -1516,9 +1424,7 @@ class HookProtocolTests(unittest.TestCase):
     )
     def test_windows_launcher_maps_an_invalid_configured_executable_to_126(self) -> None:
         def replace_interpreter(plugin_data: Path) -> None:
-            manifest = json.loads(
-                (plugin_data / "runtime.json").read_text(encoding="utf-8")
-            )
+            manifest = json.loads((plugin_data / "runtime.json").read_text(encoding="utf-8"))
             system32 = Path(os.environ["SystemRoot"]) / "System32"
             shutil.copyfile(system32 / "where.exe", manifest["interpreter"])
 
@@ -1541,11 +1447,7 @@ class HookProtocolTests(unittest.TestCase):
                 completed, _ = self.run_windows_launcher_fixture(
                     manifest_text=None,
                     configure_runtime=True,
-                    hook_source=(
-                        "import sys\n"
-                        f"sys.stderr.write('hook-{exit_code}')\n"
-                        f"raise SystemExit({exit_code})\n"
-                    ),
+                    hook_source=(f"import sys\nsys.stderr.write('hook-{exit_code}')\nraise SystemExit({exit_code})\n"),
                 )
                 self.assertEqual(exit_code, completed.returncode, completed.stderr)
                 self.assertEqual(f"hook-{exit_code}", completed.stderr)
@@ -1570,13 +1472,7 @@ class HookProtocolTests(unittest.TestCase):
         "Windows non-3.12 launcher version test",
     )
     def test_windows_launcher_rejects_a_real_non312_runtime_before_hook(self) -> None:
-        versions_root = (
-            Path.home()
-            / ".codex"
-            / "runtimes"
-            / "codex-control-plane-hooks"
-            / "versions"
-        )
+        versions_root = Path.home() / ".codex" / "runtimes" / "codex-control-plane-hooks" / "versions"
         versions_root.mkdir(parents=True, exist_ok=True)
         runtime_id = "py312-" + os.urandom(8).hex()
         version_directory = versions_root / runtime_id
@@ -1664,10 +1560,7 @@ class HookProtocolTests(unittest.TestCase):
                 )
                 if created.returncode != 0:
                     if os.environ.get("GITHUB_ACTIONS") == "true":
-                        self.fail(
-                            "Windows CI could not create the junction fixture: "
-                            + created.stderr.strip()
-                        )
+                        self.fail("Windows CI could not create the junction fixture: " + created.stderr.strip())
                     self.skipTest("Windows junction creation is unavailable")
             else:
                 link.symlink_to(real, target_is_directory=True)
@@ -1694,9 +1587,7 @@ class HookProtocolTests(unittest.TestCase):
             marker,
             create=True,
         ):
-            self.assertTrue(
-                module._is_reparse_info(mock.Mock(st_file_attributes=marker))
-            )
+            self.assertTrue(module._is_reparse_info(mock.Mock(st_file_attributes=marker)))
             self.assertFalse(module._is_reparse_info(mock.Mock(st_file_attributes=0)))
 
     def test_successful_stop_removes_session_state(self) -> None:
@@ -1753,16 +1644,11 @@ class HookProtocolTests(unittest.TestCase):
                 self.assertEqual({}, result)
 
     def test_plan_copy_command_passes_hook(self) -> None:
-        result = self.bash(
-            "cp /tmp/staged-plan.md /tmp/codex-plans/2026-07-14_hook-probe_plan.md"
-        )
+        result = self.bash("cp /tmp/staged-plan.md /tmp/codex-plans/2026-07-14_hook-probe_plan.md")
         self.assertEqual({}, result)
 
     def test_plan_heredoc_keeps_shell_indirection_guard(self) -> None:
-        result = self.bash(
-            "cat <<'EOF' > /tmp/codex-plans/2026-07-14_hook-probe_plan.md\n"
-            "# Plan\nEOF"
-        )
+        result = self.bash("cat <<'EOF' > /tmp/codex-plans/2026-07-14_hook-probe_plan.md\n# Plan\nEOF")
         self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
         self.assertIn("shell_indirection", result["hookSpecificOutput"]["permissionDecisionReason"])
 
@@ -1929,7 +1815,7 @@ class HookProtocolTests(unittest.TestCase):
     def test_absolute_interpreter_authorization_with_unrelated_limit_is_recognized(self) -> None:
         command = (
             "/usr/bin/python3 -c 'import urllib.request; "
-            "print(urllib.request.urlopen(\"https://example.com\", timeout=5).status)'"
+            'print(urllib.request.urlopen("https://example.com", timeout=5).status)\''
         )
         prompt = f"允许执行 {command}。只执行该命令一次，原样报告 stdout，不修改任何文件。"
         module = __import__("control_plane_hook")
@@ -2408,10 +2294,7 @@ class HookProtocolTests(unittest.TestCase):
         self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
 
     def test_unknown_mcp_payload_cannot_spoof_authorized_target(self) -> None:
-        self.prompt(
-            "For this turn, I explicitly authorize sending Example Capital position details "
-            "to GitHub."
-        )
+        self.prompt("For this turn, I explicitly authorize sending Example Capital position details to GitHub.")
         result = self.run_hook(
             {
                 "hook_event_name": "PreToolUse",
@@ -2422,10 +2305,7 @@ class HookProtocolTests(unittest.TestCase):
         self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
 
     def test_unknown_mcp_server_name_cannot_spoof_authorized_target(self) -> None:
-        self.prompt(
-            "For this turn, I explicitly authorize sending Example Capital position details "
-            "to GitHub."
-        )
+        self.prompt("For this turn, I explicitly authorize sending Example Capital position details to GitHub.")
         result = self.run_hook(
             {
                 "hook_event_name": "PreToolUse",
@@ -2488,8 +2368,7 @@ class HookProtocolTests(unittest.TestCase):
             with self.subTest(target=target):
                 self.turn = f"lookalike-target-{index}"
                 self.prompt(
-                    "For this turn, I explicitly authorize sending Example Capital position details "
-                    f"to {target}."
+                    f"For this turn, I explicitly authorize sending Example Capital position details to {target}."
                 )
                 result = self.run_hook(
                     {
@@ -2517,8 +2396,7 @@ class HookProtocolTests(unittest.TestCase):
     def test_cjk_delimiters_and_uppercase_mcp_target_are_allowed(self) -> None:
         cases = (
             (
-                "For this turn, I explicitly authorize sending Example Capital position details "
-                "to （Google Drive）.",
+                "For this turn, I explicitly authorize sending Example Capital position details to （Google Drive）.",
                 "mcp__google_drive__upload",
             ),
             (
@@ -2535,14 +2413,10 @@ class HookProtocolTests(unittest.TestCase):
                     {
                         "hook_event_name": "PreToolUse",
                         "tool_name": tool_name,
-                        "tool_input": {
-                            "text": f"Example Capital position: TEST_POSITION_036_{index}"
-                        },
+                        "tool_input": {"text": f"Example Capital position: TEST_POSITION_036_{index}"},
                     }
                 )
-                self.assertNotEqual(
-                    "deny", result["hookSpecificOutput"].get("permissionDecision")
-                )
+                self.assertNotEqual("deny", result["hookSpecificOutput"].get("permissionDecision"))
 
     def test_cjk_sentence_punctuation_preserves_completed_grant_sentence(self) -> None:
         self.prompt("本轮明确授权发送 Example Capital position 到 Google Drive。请继续")
@@ -2578,9 +2452,7 @@ class HookProtocolTests(unittest.TestCase):
             {
                 "hook_event_name": "PreToolUse",
                 "tool_name": "mcp__google_drive__upload",
-                "tool_input": {
-                    "text": "Example Capital position: TEST_POSITION_012\nclient: TEST_CLIENT_012"
-                },
+                "tool_input": {"text": "Example Capital position: TEST_POSITION_012\nclient: TEST_CLIENT_012"},
             }
         )
         self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
@@ -2608,9 +2480,7 @@ class HookProtocolTests(unittest.TestCase):
             {
                 "hook_event_name": "PreToolUse",
                 "tool_name": "mcp__google_drive__upload",
-                "tool_input": {
-                    "text": "Example Capital position: TEST_POSITION_014\nclient: TEST_CLIENT_014"
-                },
+                "tool_input": {"text": "Example Capital position: TEST_POSITION_014\nclient: TEST_CLIENT_014"},
             }
         )
         self.assertNotEqual("deny", result["hookSpecificOutput"].get("permissionDecision"))
@@ -2629,15 +2499,12 @@ class HookProtocolTests(unittest.TestCase):
                         "tool_name": "mcp__google_drive__upload",
                         "tool_input": {
                             "text": (
-                                f"Example Capital position:{spacing}{{{{redacted}}}}\n"
-                                f"client: TEST_CLIENT_019_{index}"
+                                f"Example Capital position:{spacing}{{{{redacted}}}}\nclient: TEST_CLIENT_019_{index}"
                             )
                         },
                     }
                 )
-                self.assertNotEqual(
-                    "deny", result["hookSpecificOutput"].get("permissionDecision")
-                )
+                self.assertNotEqual("deny", result["hookSpecificOutput"].get("permissionDecision"))
 
     def test_same_line_assignment_terminates_placeholder_only_value(self) -> None:
         self.prompt(
@@ -2648,12 +2515,7 @@ class HookProtocolTests(unittest.TestCase):
             {
                 "hook_event_name": "PreToolUse",
                 "tool_name": "mcp__google_drive__upload",
-                "tool_input": {
-                    "text": (
-                        "Example Capital position: {{redacted}}, "
-                        "client: TEST_CLIENT_030"
-                    )
-                },
+                "tool_input": {"text": ("Example Capital position: {{redacted}}, client: TEST_CLIENT_030")},
             }
         )
         self.assertNotEqual("deny", result["hookSpecificOutput"].get("permissionDecision"))
@@ -2668,10 +2530,7 @@ class HookProtocolTests(unittest.TestCase):
                 "hook_event_name": "PreToolUse",
                 "tool_name": "mcp__google_drive__upload",
                 "tool_input": {
-                    "text": (
-                        "Example Capital position: {{redacted}}, note: public, "
-                        "client: TEST_CLIENT_038"
-                    )
+                    "text": ("Example Capital position: {{redacted}}, note: public, client: TEST_CLIENT_038")
                 },
             }
         )
@@ -2710,12 +2569,7 @@ class HookProtocolTests(unittest.TestCase):
                     {
                         "hook_event_name": "PreToolUse",
                         "tool_name": "mcp__google_drive__upload",
-                        "tool_input": {
-                            "text": (
-                                f"Example Capital position{separator}"
-                                f"TEST_POSITION_031_{index}"
-                            )
-                        },
+                        "tool_input": {"text": (f"Example Capital position{separator}TEST_POSITION_031_{index}")},
                     }
                 )
                 self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
@@ -2744,12 +2598,7 @@ class HookProtocolTests(unittest.TestCase):
             {
                 "hook_event_name": "PreToolUse",
                 "tool_name": "mcp__google_drive__upload",
-                "tool_input": {
-                    "text": (
-                        '{"organization":"Example Capital",'
-                        '"position":"TEST_POSITION_039"}'
-                    )
-                },
+                "tool_input": {"text": ('{"organization":"Example Capital","position":"TEST_POSITION_039"}')},
             }
         )
         self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
@@ -2779,8 +2628,7 @@ class HookProtocolTests(unittest.TestCase):
 
     def test_grant_terms_require_boundaries(self) -> None:
         self.prompt(
-            "For this turn, I explicitly authorize sending the Example Capital navigation report "
-            "to Google Drive."
+            "For this turn, I explicitly authorize sending the Example Capital navigation report to Google Drive."
         )
         result = self.run_hook(
             {
@@ -2793,8 +2641,7 @@ class HookProtocolTests(unittest.TestCase):
 
     def test_term_specific_negation_is_excluded_from_grant(self) -> None:
         self.prompt(
-            "For this turn, I explicitly authorize sending Example Capital position, but not client, "
-            "to Google Drive."
+            "For this turn, I explicitly authorize sending Example Capital position, but not client, to Google Drive."
         )
         result = self.run_hook(
             {
@@ -2844,9 +2691,7 @@ class HookProtocolTests(unittest.TestCase):
         payload = prefix + ("\n" * (module.MAX_SCAN_CHARS - len(prefix)))
         separator_prefix = "Example Capital position"
         separator_payload = (
-            separator_prefix
-            + ("\n" * (module.MAX_SCAN_CHARS - len(separator_prefix) - 20))
-            + ": TEST_POSITION_032"
+            separator_prefix + ("\n" * (module.MAX_SCAN_CHARS - len(separator_prefix) - 20)) + ": TEST_POSITION_032"
         )
         started = time.monotonic()
         result = module._matching_concrete_term_hashes(payload)
@@ -2857,10 +2702,7 @@ class HookProtocolTests(unittest.TestCase):
         self.assertLess(elapsed, 3.0)
 
     def test_affirmative_post_term_wording_remains_authorized(self) -> None:
-        self.prompt(
-            "For this turn, I explicitly authorize sending Example Capital client included "
-            "to Google Drive."
-        )
+        self.prompt("For this turn, I explicitly authorize sending Example Capital client included to Google Drive.")
         result = self.run_hook(
             {
                 "hook_event_name": "PreToolUse",
@@ -2872,8 +2714,7 @@ class HookProtocolTests(unittest.TestCase):
 
     def test_scan_notes_does_not_match_cannot_negation(self) -> None:
         self.prompt(
-            "For this turn, I explicitly authorize sending Example Capital position scan notes "
-            "to Google Drive."
+            "For this turn, I explicitly authorize sending Example Capital position scan notes to Google Drive."
         )
         result = self.run_hook(
             {
@@ -2885,10 +2726,7 @@ class HookProtocolTests(unittest.TestCase):
         self.assertNotEqual("deny", result["hookSpecificOutput"].get("permissionDecision"))
 
     def test_trusted_connector_multiplexer_uses_tool_identity(self) -> None:
-        self.prompt(
-            "For this turn, I explicitly authorize sending Example Capital position details "
-            "to GitHub."
-        )
+        self.prompt("For this turn, I explicitly authorize sending Example Capital position details to GitHub.")
         result = self.run_hook(
             {
                 "hook_event_name": "PreToolUse",
@@ -3118,9 +2956,7 @@ class HookProtocolTests(unittest.TestCase):
         self.assertIn("1 Agent(s) remain active", result["systemMessage"])
         self.assertNotIn("handoff saved", result["systemMessage"].casefold())
         digest = hashlib.sha256(self.session.encode("utf-8")).hexdigest()[:24]
-        state = json.loads(
-            (Path(self.data_dir) / f"session-{digest}.json").read_text(encoding="utf-8")
-        )
+        state = json.loads((Path(self.data_dir) / f"session-{digest}.json").read_text(encoding="utf-8"))
         self.assertEqual(1, state["compaction_count"])
         self.assertIn("agent-1", state["active_agents"])
 
@@ -3244,9 +3080,7 @@ class HookProtocolTests(unittest.TestCase):
             with self.subTest(command=command):
                 result = self.bash(command)
                 self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
-                self.assertIn(
-                    "git_non_read_only", result["hookSpecificOutput"]["permissionDecisionReason"]
-                )
+                self.assertIn("git_non_read_only", result["hookSpecificOutput"]["permissionDecisionReason"])
 
         for command in [
             "git remote update",
@@ -3298,9 +3132,7 @@ class HookProtocolTests(unittest.TestCase):
             with self.subTest(command=command):
                 result = self.bash(command)
                 self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
-                self.assertIn(
-                    "git_non_read_only", result["hookSpecificOutput"]["permissionDecisionReason"]
-                )
+                self.assertIn("git_non_read_only", result["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_git_branch_metadata_mutations_are_denied(self) -> None:
         for command in [
@@ -3313,9 +3145,7 @@ class HookProtocolTests(unittest.TestCase):
             with self.subTest(command=command):
                 result = self.bash(command)
                 self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
-                self.assertIn(
-                    "git_non_read_only", result["hookSpecificOutput"]["permissionDecisionReason"]
-                )
+                self.assertIn("git_non_read_only", result["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_recursive_delete_is_denied_without_force(self) -> None:
         commands = [
@@ -3433,9 +3263,7 @@ class HookProtocolTests(unittest.TestCase):
         self.prompt(f"本轮明确授权执行 `{command}`。", cwd=self.data_dir)
         allowed = self.bash(command, cwd=self.data_dir)
         replay = self.bash(command, cwd=self.data_dir)
-        self.assertNotEqual(
-            "deny", allowed["hookSpecificOutput"].get("permissionDecision"), msg=allowed
-        )
+        self.assertNotEqual("deny", allowed["hookSpecificOutput"].get("permissionDecision"), msg=allowed)
         self.assertEqual("deny", replay["hookSpecificOutput"]["permissionDecision"])
 
     def test_exact_git_grant_remains_available_when_transaction_is_incomplete(self) -> None:
@@ -3470,9 +3298,7 @@ class HookProtocolTests(unittest.TestCase):
             allowed_commit["hookSpecificOutput"].get("permissionDecision"),
             msg=allowed_commit,
         )
-        self.assertEqual(
-            "deny", replay_commit["hookSpecificOutput"]["permissionDecision"]
-        )
+        self.assertEqual("deny", replay_commit["hookSpecificOutput"]["permissionDecision"])
 
         self.turn = "exact-push-fallback"
         push = f"git -C '{repo}' push origin main"
@@ -3509,9 +3335,7 @@ class HookProtocolTests(unittest.TestCase):
 
         allowed = self.bash(command, cwd=str(repo))
         replay = self.bash(command, cwd=str(repo))
-        self.assertNotEqual(
-            "deny", allowed["hookSpecificOutput"].get("permissionDecision"), msg=allowed
-        )
+        self.assertNotEqual("deny", allowed["hookSpecificOutput"].get("permissionDecision"), msg=allowed)
         self.assertEqual("deny", replay["hookSpecificOutput"]["permissionDecision"])
 
     def test_incomplete_transaction_with_scope_override_fails_closed(self) -> None:
@@ -3526,14 +3350,8 @@ class HookProtocolTests(unittest.TestCase):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-        command_a = (
-            "git --git-dir='repo-a/.git' --work-tree='repo-a' "
-            "commit -m checkpoint-a"
-        )
-        command_b = (
-            "git --git-dir='repo-b/.git' --work-tree='repo-b' "
-            "commit -m checkpoint-b"
-        )
+        command_a = "git --git-dir='repo-a/.git' --work-tree='repo-a' commit -m checkpoint-a"
+        command_b = "git --git-dir='repo-b/.git' --work-tree='repo-b' commit -m checkpoint-b"
         self.prompt(
             f"本轮明确授权执行 `{command_a}` 和 `{command_b}`，并在 sample-owner 下创建 "
             "scope-override-transaction private repository。",
@@ -3541,16 +3359,12 @@ class HookProtocolTests(unittest.TestCase):
         )
         for command in (command_a, command_b):
             result = self.bash(command, cwd=str(root))
-            self.assertEqual(
-                "deny", result["hookSpecificOutput"]["permissionDecision"]
-            )
+            self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
 
         self.turn = "scope-override-without-publication"
         self.prompt(f"本轮明确授权执行 `{command_a}`。", cwd=str(root))
         allowed = self.bash(command_a, cwd=str(root))
-        self.assertNotEqual(
-            "deny", allowed["hookSpecificOutput"].get("permissionDecision"), msg=allowed
-        )
+        self.assertNotEqual("deny", allowed["hookSpecificOutput"].get("permissionDecision"), msg=allowed)
 
     def test_exact_push_options_are_hashable_and_one_shot(self) -> None:
         repo = Path(self.data_dir) / "exact-push-options"
@@ -3594,9 +3408,7 @@ class HookProtocolTests(unittest.TestCase):
                     allowed["hookSpecificOutput"].get("permissionDecision"),
                     msg=allowed,
                 )
-                self.assertEqual(
-                    "deny", replay["hookSpecificOutput"]["permissionDecision"]
-                )
+                self.assertEqual("deny", replay["hookSpecificOutput"]["permissionDecision"])
         rejected = (
             "git push --unknown origin main",
             "git push --repo=origin main",
@@ -3638,9 +3450,7 @@ class HookProtocolTests(unittest.TestCase):
         self.prompt(f"本轮明确授权执行 `{command}`。", cwd=str(repo))
         allowed = self.bash(command, cwd=str(repo))
         replay = self.bash(command, cwd=str(repo))
-        self.assertNotEqual(
-            "deny", allowed["hookSpecificOutput"].get("permissionDecision"), msg=allowed
-        )
+        self.assertNotEqual("deny", allowed["hookSpecificOutput"].get("permissionDecision"), msg=allowed)
         self.assertEqual("deny", replay["hookSpecificOutput"]["permissionDecision"])
 
         self.turn = "exact-push-non-github-drift"
@@ -3782,8 +3592,7 @@ class HookProtocolTests(unittest.TestCase):
                     module._normalize_git_global_arg(quoted),
                 )
         windows_space_command = (
-            "git --git-dir='C:\\Program Files\\repo\\.git' "
-            "--work-tree='C:\\Program Files\\repo' push origin main"
+            "git --git-dir='C:\\Program Files\\repo\\.git' --work-tree='C:\\Program Files\\repo' push origin main"
         )
         self.assertEqual(
             [
@@ -3824,14 +3633,8 @@ class HookProtocolTests(unittest.TestCase):
             )
 
         commands = (
-            (
-                f"git --git-dir='{target_repo / '.git'}' "
-                f"--work-tree='{target_repo}' push origin main"
-            ),
-            (
-                f"git --git-dir '{target_repo / '.git'}' "
-                f"--work-tree '{target_repo}' push origin main"
-            ),
+            (f"git --git-dir='{target_repo / '.git'}' --work-tree='{target_repo}' push origin main"),
+            (f"git --git-dir '{target_repo / '.git'}' --work-tree '{target_repo}' push origin main"),
         )
         for index, command in enumerate(commands):
             with self.subTest(command=command):
@@ -3862,9 +3665,7 @@ class HookProtocolTests(unittest.TestCase):
                     check=True,
                 )
                 result = self.bash(command, cwd=str(cwd_repo))
-                self.assertEqual(
-                    "deny", result["hookSpecificOutput"]["permissionDecision"]
-                )
+                self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
 
     def test_exact_push_git_dir_binding_ignores_cwd_remote_drift(self) -> None:
         cwd_repo = Path(self.data_dir) / "git dir cwd drift"
@@ -3893,10 +3694,7 @@ class HookProtocolTests(unittest.TestCase):
                 check=True,
             )
 
-        command = (
-            f"git --git-dir='{target_repo / '.git'}' "
-            f"--work-tree='{target_repo}' push origin main"
-        )
+        command = f"git --git-dir='{target_repo / '.git'}' --work-tree='{target_repo}' push origin main"
         self.prompt(f"本轮明确授权执行 `{command}`。", cwd=str(cwd_repo))
         subprocess.run(
             [
@@ -3911,9 +3709,7 @@ class HookProtocolTests(unittest.TestCase):
             check=True,
         )
         result = self.bash(command, cwd=str(cwd_repo))
-        self.assertNotEqual(
-            "deny", result["hookSpecificOutput"].get("permissionDecision"), msg=result
-        )
+        self.assertNotEqual("deny", result["hookSpecificOutput"].get("permissionDecision"), msg=result)
 
     @unittest.skipIf(os.name == "nt", "POSIX symlink retarget semantics")
     def test_repo_scope_resolves_symlinks_before_authorization(self) -> None:
@@ -4059,23 +3855,13 @@ class HookProtocolTests(unittest.TestCase):
         for operation, details in cases.items():
             with self.subTest(operation=operation):
                 pending = {**common, **details, "operation": operation}
-                grant = module._local_git_grant_from_prompt(
-                    "批准上述命令。", scope, "pending-reference-turn", pending
-                )
+                grant = module._local_git_grant_from_prompt("批准上述命令。", scope, "pending-reference-turn", pending)
                 self.assertIsInstance(grant, dict)
                 self.assertEqual({operation}, set(grant["operations"]))
                 self.assertEqual(common["digest"], grant["pending_digest"])
-                self.assertTrue(
-                    module._git_grant_matches(
-                        grant, pending, "pending-reference-turn"
-                    )
-                )
+                self.assertTrue(module._git_grant_matches(grant, pending, "pending-reference-turn"))
                 module._consume_git_grant(grant, pending)
-                self.assertFalse(
-                    module._git_grant_matches(
-                        grant, pending, "pending-reference-turn"
-                    )
-                )
+                self.assertFalse(module._git_grant_matches(grant, pending, "pending-reference-turn"))
 
     def test_pending_reference_rejects_unusable_or_ambiguous_targets(self) -> None:
         module = __import__("control_plane_hook")
@@ -4098,9 +3884,7 @@ class HookProtocolTests(unittest.TestCase):
         for pending in invalid:
             with self.subTest(pending=pending):
                 self.assertIsNone(
-                    module._local_git_grant_from_prompt(
-                        "批准上述命令。", scope, "invalid-pending-turn", pending
-                    )
+                    module._local_git_grant_from_prompt("批准上述命令。", scope, "invalid-pending-turn", pending)
                 )
 
     def test_exact_high_impact_authorization_is_one_shot(self) -> None:
@@ -4121,9 +3905,7 @@ class HookProtocolTests(unittest.TestCase):
         )
 
         add = self.probe_transaction_command("git add src/app.py", cwd=repo)
-        commit = self.probe_transaction_command(
-            "git commit -m checkpoint", cwd=repo
-        )
+        commit = self.probe_transaction_command("git commit -m checkpoint", cwd=repo)
         run = self.bash(command, cwd=repo)
 
         self.assertNotEqual("deny", add["hookSpecificOutput"].get("permissionDecision"))
@@ -4137,15 +3919,12 @@ class HookProtocolTests(unittest.TestCase):
         cases = {
             f"批准在 {repo} 执行 git add。": {"add"},
             (
-                "批准执行 `gh repo create sample-owner/commit-service --private "
-                f"--source '{repo}' --remote origin`。"
+                f"批准执行 `gh repo create sample-owner/commit-service --private --source '{repo}' --remote origin`。"
             ): set(),
             "批准在当前仓库执行 `git add commit-service.py`。": {"add"},
             "批准在当前仓库执行 `git commit -m 'add docs'`。": {"commit"},
             "批准在当前仓库执行 `git commit -m '允许推送'`。": {"commit"},
-            "批准在当前仓库执行 `git commit -m 'git push origin main'`。": {
-                "commit"
-            },
+            "批准在当前仓库执行 `git commit -m 'git push origin main'`。": {"commit"},
             "批准在当前仓库执行 git init/add/commit，并推送 main。": {
                 "init",
                 "add",
@@ -4172,9 +3951,7 @@ class HookProtocolTests(unittest.TestCase):
         grant = json.loads(state_path.read_text(encoding="utf-8"))["local_git_grant"]
         self.assertEqual({"add"}, set(grant["operations"]))
         blocked = self.bash("git commit -m checkpoint", cwd=str(repo))
-        self.assertEqual(
-            "deny", blocked["hookSpecificOutput"]["permissionDecision"]
-        )
+        self.assertEqual("deny", blocked["hookSpecificOutput"]["permissionDecision"])
 
     def test_scoped_git_transaction_binds_operation_branch_and_replay(self) -> None:
         repo_path = Path(self.data_dir) / "transaction-repo"
@@ -4200,23 +3977,17 @@ class HookProtocolTests(unittest.TestCase):
         allowed = (
             self.probe_transaction_command("git add src/app.py", cwd=repo),
             self.probe_transaction_command("git commit -m checkpoint", cwd=repo),
-            self.probe_transaction_command(
-                f"git push origin {branch}", cwd=repo
-            ),
+            self.probe_transaction_command(f"git push origin {branch}", cwd=repo),
         )
         for result in allowed:
             self.assertNotEqual("deny", result["hookSpecificOutput"].get("permissionDecision"))
         self.assertEqual(
             "deny",
-            self.bash(f"git push origin {branch}", cwd=repo)["hookSpecificOutput"][
-                "permissionDecision"
-            ],
+            self.bash(f"git push origin {branch}", cwd=repo)["hookSpecificOutput"]["permissionDecision"],
         )
         self.assertEqual(
             "deny",
-            self.bash("git push origin main", cwd=repo)["hookSpecificOutput"][
-                "permissionDecision"
-            ],
+            self.bash("git push origin main", cwd=repo)["hookSpecificOutput"]["permissionDecision"],
         )
 
     def test_scoped_transaction_parses_push_remote_and_branch(self) -> None:
@@ -4265,9 +4036,7 @@ class HookProtocolTests(unittest.TestCase):
         }
         for prompt, expected in valid.items():
             with self.subTest(valid=prompt):
-                self.assertEqual(
-                    expected, module._prompt_push_target(prompt, self.data_dir, None)
-                )
+                self.assertEqual(expected, module._prompt_push_target(prompt, self.data_dir, None))
 
         invalid = (
             "push upstream main",
@@ -4279,9 +4048,7 @@ class HookProtocolTests(unittest.TestCase):
         )
         for prompt in invalid:
             with self.subTest(invalid=prompt):
-                self.assertIsNone(
-                    module._prompt_push_target(prompt, self.data_dir, None)
-                )
+                self.assertIsNone(module._prompt_push_target(prompt, self.data_dir, None))
 
     def test_private_publication_transaction_binds_repo_target_and_origin(self) -> None:
         root = Path(self.data_dir) / "publication"
@@ -4329,18 +4096,10 @@ class HookProtocolTests(unittest.TestCase):
             fixture_gh.chmod(0o700)
 
         original_path = os.environ.get("PATH", "")
-        fixture_env = {
-            "PATH": (
-                f"{root}{os.pathsep}{original_path}" if original_path else str(root)
-            )
-        }
+        fixture_env = {"PATH": (f"{root}{os.pathsep}{original_path}" if original_path else str(root))}
         if os.name == "nt":
             original_pathext = os.environ.get("PATHEXT", "")
-            fixture_env["PATHEXT"] = (
-                f".EXE{os.pathsep}{original_pathext}"
-                if original_pathext
-                else ".EXE"
-            )
+            fixture_env["PATHEXT"] = f".EXE{os.pathsep}{original_pathext}" if original_pathext else ".EXE"
 
         with mock.patch.dict(os.environ, fixture_env, clear=False):
             resolved_gh = module.shutil.which("gh")
@@ -4351,9 +4110,7 @@ class HookProtocolTests(unittest.TestCase):
             )
             for command in commands:
                 with self.subTest(command=command.split()[0]):
-                    result = self.probe_transaction_command(
-                        command, cwd=str(root)
-                    )
+                    result = self.probe_transaction_command(command, cwd=str(root))
                     self.assertNotEqual(
                         "deny",
                         result["hookSpecificOutput"].get("permissionDecision"),
@@ -4363,9 +4120,7 @@ class HookProtocolTests(unittest.TestCase):
         self.assertEqual("deny", replay["hookSpecificOutput"]["permissionDecision"])
 
     def test_publication_transaction_continues_after_exact_local_correction(self) -> None:
-        root, repo, target, state_path = self.prepare_publication_grant(
-            "resume-workbench"
-        )
+        root, repo, target, state_path = self.prepare_publication_grant("resume-workbench")
         (repo / "README.md").write_text("publication fixture\n", encoding="utf-8")
         subprocess.run(
             ["git", "-C", str(repo), "config", "user.name", "Hook Test"],
@@ -4382,9 +4137,7 @@ class HookProtocolTests(unittest.TestCase):
             ],
             check=True,
         )
-        initial_grant = json.loads(state_path.read_text(encoding="utf-8"))[
-            "local_git_grant"
-        ]
+        initial_grant = json.loads(state_path.read_text(encoding="utf-8"))["local_git_grant"]
         for index, command in enumerate(
             (
                 f"git -C '{repo}' init -b main",
@@ -4413,19 +4166,12 @@ class HookProtocolTests(unittest.TestCase):
 
         self.turn = "publication-resume-correction"
         config_command = f"git -C '{repo}' config --local user.name 'Release Bot'"
-        amend_command = (
-            f"git -C '{repo}' commit --amend --no-edit --reset-author"
-        )
+        amend_command = f"git -C '{repo}' commit --amend --no-edit --reset-author"
         self.prompt(
-            "本轮明确授权执行：\n"
-            f"{config_command}\n"
-            f"{amend_command}\n"
-            "随后继续执行上一条已授权的发布事务。",
+            f"本轮明确授权执行：\n{config_command}\n{amend_command}\n随后继续执行上一条已授权的发布事务。",
             cwd=str(root),
         )
-        continued_grant = json.loads(state_path.read_text(encoding="utf-8"))[
-            "local_git_grant"
-        ]
+        continued_grant = json.loads(state_path.read_text(encoding="utf-8"))["local_git_grant"]
         for key in (
             "transaction_id",
             "issued_at",
@@ -4447,43 +4193,27 @@ class HookProtocolTests(unittest.TestCase):
             )
         replayed_amend = self.bash(amend_command, cwd=str(root))
         replayed_add = self.bash(f"git -C '{repo}' add -- .", cwd=str(root))
-        self.assertEqual(
-            "deny", replayed_amend["hookSpecificOutput"]["permissionDecision"]
-        )
-        self.assertEqual(
-            "deny", replayed_add["hookSpecificOutput"]["permissionDecision"]
-        )
+        self.assertEqual("deny", replayed_amend["hookSpecificOutput"]["permissionDecision"])
+        self.assertEqual("deny", replayed_add["hookSpecificOutput"]["permissionDecision"])
 
         fixture_gh = root / ("gh.exe" if os.name == "nt" else "gh")
         fixture_gh.touch()
         if os.name != "nt":
             fixture_gh.chmod(0o700)
         original_path = os.environ.get("PATH", "")
-        fixture_env = {
-            "PATH": (
-                f"{root}{os.pathsep}{original_path}"
-                if original_path
-                else str(root)
-            )
-        }
+        fixture_env = {"PATH": (f"{root}{os.pathsep}{original_path}" if original_path else str(root))}
         if os.name == "nt":
-            fixture_env["PATHEXT"] = ".EXE" + os.pathsep + os.environ.get(
-                "PATHEXT", ""
-            )
+            fixture_env["PATHEXT"] = ".EXE" + os.pathsep + os.environ.get("PATHEXT", "")
         with mock.patch.dict(os.environ, fixture_env, clear=False):
             create = self.probe_transaction_command(
                 f"gh repo create {target} --private --source '{repo}' --remote origin",
                 cwd=str(root),
             )
-        self.assertNotEqual(
-            "deny", create["hookSpecificOutput"].get("permissionDecision"), msg=create
-        )
+        self.assertNotEqual("deny", create["hookSpecificOutput"].get("permissionDecision"), msg=create)
         push = self.bash(f"git -C '{repo}' push -u origin main", cwd=str(root))
         completed_state = json.loads(state_path.read_text(encoding="utf-8"))
         replay = self.bash(f"git -C '{repo}' push -u origin main", cwd=str(root))
-        self.assertNotEqual(
-            "deny", push["hookSpecificOutput"].get("permissionDecision"), msg=push
-        )
+        self.assertNotEqual("deny", push["hookSpecificOutput"].get("permissionDecision"), msg=push)
         self.assertIsInstance(completed_state["local_git_grant"], dict)
         self.assertTrue(completed_state["pending_permission_authorizations"])
         self.assertEqual("deny", replay["hookSpecificOutput"]["permissionDecision"])
@@ -4494,9 +4224,7 @@ class HookProtocolTests(unittest.TestCase):
             with self.subTest(label=label):
                 self.session = f"resume-boundary-session-{index}"
                 self.turn = f"resume-boundary-initial-{index}"
-                root, repo, _, state_path = self.prepare_publication_grant(
-                    f"resume-boundary-{index}"
-                )
+                root, repo, _, state_path = self.prepare_publication_grant(f"resume-boundary-{index}")
                 if label == "expired":
                     state = json.loads(state_path.read_text(encoding="utf-8"))
                     state["local_git_grant"]["issued_at"] = 0
@@ -4520,12 +4248,8 @@ class HookProtocolTests(unittest.TestCase):
                     )
                 )
                 self.prompt(prompt, cwd=str(root))
-                denied = self.bash(
-                    f"git -C '{repo}' push origin main", cwd=str(root)
-                )
-                self.assertEqual(
-                    "deny", denied["hookSpecificOutput"]["permissionDecision"]
-                )
+                denied = self.bash(f"git -C '{repo}' push origin main", cwd=str(root))
+                self.assertEqual("deny", denied["hookSpecificOutput"]["permissionDecision"])
                 if label == "policy-disabled":
                     self.update_policy(enable_scoped_git_transactions=True)
 
@@ -4534,9 +4258,7 @@ class HookProtocolTests(unittest.TestCase):
             with self.subTest(label=label):
                 self.session = f"resume-context-session-{index}"
                 self.turn = f"resume-context-initial-{index}"
-                root, repo, _, _ = self.prepare_publication_grant(
-                    f"resume-context-{index}"
-                )
+                root, repo, _, _ = self.prepare_publication_grant(f"resume-context-{index}")
                 continuation_cwd = root
                 if label == "session":
                     self.session = f"resume-context-other-session-{index}"
@@ -4554,9 +4276,7 @@ class HookProtocolTests(unittest.TestCase):
                     f"git -C '{repo}' push origin main",
                     cwd=str(continuation_cwd),
                 )
-                self.assertEqual(
-                    "deny", denied["hookSpecificOutput"]["permissionDecision"]
-                )
+                self.assertEqual("deny", denied["hookSpecificOutput"]["permissionDecision"])
 
     def test_publication_transaction_resume_rejects_scope_target_branch_and_risk_drift(self) -> None:
         cases = (
@@ -4576,55 +4296,33 @@ class HookProtocolTests(unittest.TestCase):
             with self.subTest(label=label):
                 self.session = f"resume-drift-session-{index}"
                 self.turn = f"resume-drift-initial-{index}"
-                root, repo, target, _ = self.prepare_publication_grant(
-                    f"resume-drift-{index}"
-                )
+                root, repo, target, _ = self.prepare_publication_grant(f"resume-drift-{index}")
                 other = root / "other-repo"
                 other.mkdir()
                 commands = {
                     "scope": f"git -C '{other}' commit --amend --no-edit --reset-author",
                     "target": (
-                        f"gh repo create fixture-owner/other-workbench --private "
-                        f"--source '{repo}' --remote origin"
+                        f"gh repo create fixture-owner/other-workbench --private --source '{repo}' --remote origin"
                     ),
                     "branch": f"git -C '{repo}' push origin other-branch",
-                    "visibility": (
-                        f"gh repo create {target} --public --source '{repo}' --remote origin"
-                    ),
+                    "visibility": (f"gh repo create {target} --public --source '{repo}' --remote origin"),
                     "force": f"git -C '{repo}' push --force origin main",
-                    "global-config": (
-                        f"git -C '{repo}' config --global user.name 'Wrong Scope'"
-                    ),
-                    "hooks-path": (
-                        f"git -C '{repo}' config --local core.hooksPath /tmp/hooks"
-                    ),
-                    "credential-helper": (
-                        f"git -C '{repo}' config --local credential.helper store"
-                    ),
-                    "ssh-command": (
-                        f"git -C '{repo}' config --local core.sshCommand 'ssh -i /tmp/key'"
-                    ),
+                    "global-config": (f"git -C '{repo}' config --global user.name 'Wrong Scope'"),
+                    "hooks-path": (f"git -C '{repo}' config --local core.hooksPath /tmp/hooks"),
+                    "credential-helper": (f"git -C '{repo}' config --local credential.helper store"),
+                    "ssh-command": (f"git -C '{repo}' config --local core.sshCommand 'ssh -i /tmp/key'"),
                     "remote-rewrite": (
-                        f"git -C '{repo}' remote set-url origin "
-                        "https://github.com/fixture-owner/other.git"
+                        f"git -C '{repo}' remote set-url origin https://github.com/fixture-owner/other.git"
                     ),
-                    "unsafe-amend": (
-                        f"git -C '{repo}' commit --amend --no-edit"
-                    ),
+                    "unsafe-amend": (f"git -C '{repo}' commit --amend --no-edit"),
                 }
                 self.turn = f"resume-drift-next-{index}"
                 self.prompt(
-                    "本轮明确授权执行：\n"
-                    f"{commands[label]}\n"
-                    "随后继续执行上一条已授权的发布事务。",
+                    f"本轮明确授权执行：\n{commands[label]}\n随后继续执行上一条已授权的发布事务。",
                     cwd=str(root),
                 )
-                denied = self.bash(
-                    f"git -C '{repo}' push origin main", cwd=str(root)
-                )
-                self.assertEqual(
-                    "deny", denied["hookSpecificOutput"]["permissionDecision"]
-                )
+                denied = self.bash(f"git -C '{repo}' push origin main", cwd=str(root))
+                self.assertEqual("deny", denied["hookSpecificOutput"]["permissionDecision"])
 
     def test_publication_transaction_rejects_visibility_target_force_and_fake_tools(self) -> None:
         root = Path(self.data_dir) / "publication-attacks"
@@ -4649,9 +4347,7 @@ class HookProtocolTests(unittest.TestCase):
                 self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
 
     def test_publication_transaction_never_infers_wildcard_repo_scopes(self) -> None:
-        self.prompt(
-            "允许在两个源目录执行 git init/add/commit，并创建两个 private repository，推送 main。"
-        )
+        self.prompt("允许在两个源目录执行 git init/add/commit，并创建两个 private repository，推送 main。")
         result = self.bash(
             f"git -C '{Path(self.data_dir) / 'unlisted'}' init -b main",
             cwd=self.data_dir,
@@ -4697,9 +4393,7 @@ class HookProtocolTests(unittest.TestCase):
                 self.assertEqual({}, self.bash(command))
 
         self.assertTrue(
-            module._contains_clone_invocation(
-                "echo ready && git clone https://github.com/example/a.git /tmp/a"
-            )
+            module._contains_clone_invocation("echo ready && git clone https://github.com/example/a.git /tmp/a")
         )
         self.assertTrue(module._contains_clone_invocation("gh repo clone example/a"))
         executable_contexts = (
@@ -4716,14 +4410,11 @@ class HookProtocolTests(unittest.TestCase):
         dynamic_clone_contexts = (
             "git -c protocol.version=2 clone https://github.com/example/a.git /tmp/a",
             "git -cprotocol.version=2 clone https://github.com/example/a.git /tmp/a",
-            "git -C /tmp -c protocol.version=2 clone "
-            "https://github.com/example/a.git /tmp/a",
-            "git -c alias.audit=clone audit --depth 1 --no-checkout "
-            "https://github.com/example/a.git /tmp/a",
+            "git -C /tmp -c protocol.version=2 clone https://github.com/example/a.git /tmp/a",
+            "git -c alias.audit=clone audit --depth 1 --no-checkout https://github.com/example/a.git /tmp/a",
             "git --config-env=alias.audit=GIT_ALIAS audit --depth 1 --no-checkout "
             "https://github.com/example/a.git /tmp/a",
-            "git --config-env protocol.version=GIT_PROTOCOL clone "
-            "https://github.com/example/a.git /tmp/a",
+            "git --config-env protocol.version=GIT_PROTOCOL clone https://github.com/example/a.git /tmp/a",
         )
         for command in dynamic_clone_contexts:
             with self.subTest(dynamic_clone=command):
@@ -4758,10 +4449,7 @@ class HookProtocolTests(unittest.TestCase):
         workspace = Path(self.data_dir) / "tracked-clone-workspace"
         workspace.mkdir()
         destination = workspace / "tracked-clone"
-        command = (
-            "git clone --depth 1 --no-checkout "
-            f"https://github.com/example-owner/example-repo.git {destination}"
-        )
+        command = f"git clone --depth 1 --no-checkout https://github.com/example-owner/example-repo.git {destination}"
         event = {
             "tool_name": "exec_command",
             "tool_use_id": "tracked-clone",
@@ -4781,9 +4469,7 @@ class HookProtocolTests(unittest.TestCase):
             }
         )
         self.assertEqual({}, self.bash(f"cat '{setup}'", cwd=str(workspace)))
-        self.assertEqual(
-            {}, self.bash(f"git -C '{destination}' status --short", cwd=str(workspace))
-        )
+        self.assertEqual({}, self.bash(f"git -C '{destination}' status --short", cwd=str(workspace)))
         execution = f"python3 '{setup}'"
         blocked = (
             (execution, str(workspace)),
@@ -4810,15 +4496,11 @@ class HookProtocolTests(unittest.TestCase):
         self.prompt(f"本轮明确授权执行 `{execution}`。", cwd=str(workspace))
         self.assertNotEqual(
             "deny",
-            self.bash(execution, cwd=str(workspace))["hookSpecificOutput"].get(
-                "permissionDecision"
-            ),
+            self.bash(execution, cwd=str(workspace))["hookSpecificOutput"].get("permissionDecision"),
         )
         self.assertEqual(
             "deny",
-            self.bash(execution, cwd=str(workspace))["hookSpecificOutput"][
-                "permissionDecision"
-            ],
+            self.bash(execution, cwd=str(workspace))["hookSpecificOutput"]["permissionDecision"],
         )
 
     def test_untrackable_clone_forms_fail_even_with_exact_authorization(self) -> None:
@@ -4829,10 +4511,7 @@ class HookProtocolTests(unittest.TestCase):
             "gh repo clone example-owner/example-repo",
             "gh repo clone example-owner/example-repo relative-clone",
             "sh -c 'git clone https://github.com/example-owner/example-repo.git nested'",
-            (
-                "sh -c 'sh -c \"git clone "
-                "https://github.com/example-owner/example-repo.git nested\"'"
-            ),
+            ("sh -c 'sh -c \"git clone https://github.com/example-owner/example-repo.git nested\"'"),
             (
                 "git -c protocol.version=2 clone "
                 f"https://github.com/example-owner/example-repo.git {workspace / 'dynamic'}"
@@ -4918,10 +4597,7 @@ class HookProtocolTests(unittest.TestCase):
         workspace = Path(self.data_dir) / "shell-override"
         workspace.mkdir()
         destination = workspace / "clone"
-        command = (
-            "git clone --depth 1 --no-checkout "
-            f"https://github.com/example-owner/example-repo.git {destination}"
-        )
+        command = f"git clone --depth 1 --no-checkout https://github.com/example-owner/example-repo.git {destination}"
         for shell in (None, "", "zsh", str(workspace / "attacker-shell")):
             with self.subTest(shell=shell):
                 result = self.run_hook(
@@ -4975,18 +4651,10 @@ class HookProtocolTests(unittest.TestCase):
             "tool_input": {"cmd": command, "workdir": str(workspace)},
             "cwd": str(workspace),
         }
-        self.run_hook(
-            {"hook_event_name": "PreToolUse", "tool_use_id": "exact-id", **base}
-        )
-        wrong_id = self.run_hook(
-            {"hook_event_name": "PermissionRequest", "tool_use_id": "other-id", **base}
-        )
-        exact = self.run_hook(
-            {"hook_event_name": "PermissionRequest", "tool_use_id": "exact-id", **base}
-        )
-        replay = self.run_hook(
-            {"hook_event_name": "PermissionRequest", "tool_use_id": "exact-id", **base}
-        )
+        self.run_hook({"hook_event_name": "PreToolUse", "tool_use_id": "exact-id", **base})
+        wrong_id = self.run_hook({"hook_event_name": "PermissionRequest", "tool_use_id": "other-id", **base})
+        exact = self.run_hook({"hook_event_name": "PermissionRequest", "tool_use_id": "exact-id", **base})
+        replay = self.run_hook({"hook_event_name": "PermissionRequest", "tool_use_id": "exact-id", **base})
         self.assertEqual("deny", wrong_id["hookSpecificOutput"]["decision"]["behavior"])
         self.assertEqual("allow", exact["hookSpecificOutput"]["decision"]["behavior"])
         self.assertEqual("deny", replay["hookSpecificOutput"]["decision"]["behavior"])
@@ -5000,9 +4668,7 @@ class HookProtocolTests(unittest.TestCase):
             "tool_input": {"cmd": command, "workdir": str(workspace)},
             "cwd": str(workspace),
         }
-        for index, override in enumerate(
-            ({"session_id": "other-session"}, {"turn_id": "other-turn"})
-        ):
+        for index, override in enumerate(({"session_id": "other-session"}, {"turn_id": "other-turn"})):
             with self.subTest(override=override):
                 self.turn = f"permission-scope-{index}"
                 self.prompt(f"本轮明确授权执行 `{command}`。", cwd=str(workspace))
@@ -5022,9 +4688,7 @@ class HookProtocolTests(unittest.TestCase):
                         **override,
                     }
                 )
-                self.assertEqual(
-                    "deny", result["hookSpecificOutput"]["decision"]["behavior"]
-                )
+                self.assertEqual("deny", result["hookSpecificOutput"]["decision"]["behavior"])
 
     def test_permission_request_binds_base_and_effective_cwd(self) -> None:
         workspace = Path(self.data_dir) / "permission-cwd"
@@ -5058,9 +4722,7 @@ class HookProtocolTests(unittest.TestCase):
                         "cwd": permission_cwd,
                     }
                 )
-                self.assertEqual(
-                    "deny", result["hookSpecificOutput"]["decision"]["behavior"]
-                )
+                self.assertEqual("deny", result["hookSpecificOutput"]["decision"]["behavior"])
 
     def test_exec_command_rejects_prefix_rule(self) -> None:
         result = self.run_hook(
@@ -5127,9 +4789,7 @@ class HookProtocolTests(unittest.TestCase):
                         "cwd": str(workspace),
                     }
                 )
-                self.assertEqual(
-                    "deny", result["hookSpecificOutput"]["decision"]["behavior"]
-                )
+                self.assertEqual("deny", result["hookSpecificOutput"]["decision"]["behavior"])
 
     def test_constrained_clone_requires_exact_exec_tool_and_nonempty_id(self) -> None:
         workspace = Path(self.data_dir) / "clone-tool-binding"
@@ -5143,11 +4803,7 @@ class HookProtocolTests(unittest.TestCase):
         for index, (tool_name, tool_use_id) in enumerate(cases):
             destination = workspace / f"clone-{index}"
             command = f"git clone --depth 1 --no-checkout {source} {destination}"
-            tool_input = (
-                {"command": command}
-                if tool_name == "Bash"
-                else {"cmd": command, "workdir": str(workspace)}
-            )
+            tool_input = {"command": command} if tool_name == "Bash" else {"cmd": command, "workdir": str(workspace)}
             with self.subTest(tool_name=tool_name, tool_use_id=tool_use_id):
                 result = self.run_hook(
                     {
@@ -5158,18 +4814,13 @@ class HookProtocolTests(unittest.TestCase):
                         "cwd": str(workspace),
                     }
                 )
-                self.assertEqual(
-                    "deny", result["hookSpecificOutput"]["permissionDecision"]
-                )
+                self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
 
     def test_constrained_clone_rejects_nondefault_sandbox(self) -> None:
         workspace = Path(self.data_dir) / "clone-sandbox"
         workspace.mkdir()
         destination = workspace / "clone"
-        command = (
-            "git clone --depth 1 --no-checkout "
-            f"https://github.com/sample-owner/sample-repo.git {destination}"
-        )
+        command = f"git clone --depth 1 --no-checkout https://github.com/sample-owner/sample-repo.git {destination}"
         result = self.run_hook(
             {
                 "hook_event_name": "PreToolUse",
@@ -5193,8 +4844,7 @@ class HookProtocolTests(unittest.TestCase):
         fake_git.write_text("fixture\n", encoding="utf-8")
         destination = workspace / "clone"
         command = (
-            f"'{fake_git}' clone --depth 1 --no-checkout "
-            f"https://github.com/sample-owner/sample-repo.git {destination}"
+            f"'{fake_git}' clone --depth 1 --no-checkout https://github.com/sample-owner/sample-repo.git {destination}"
         )
         result = self.exec_command(command, cwd=str(workspace), tool_use_id="fake-git")
         self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
@@ -5203,10 +4853,7 @@ class HookProtocolTests(unittest.TestCase):
         workspace = Path(self.data_dir) / "clone-host"
         workspace.mkdir()
         destination = Path(self.data_dir).parent / f"outside-{Path(self.data_dir).name}"
-        command = (
-            "git clone --depth 1 --no-checkout "
-            f"https://github.com/sample-owner/sample-repo.git {destination}"
-        )
+        command = f"git clone --depth 1 --no-checkout https://github.com/sample-owner/sample-repo.git {destination}"
         result = self.exec_command(command, cwd=str(workspace), tool_use_id="outside-host")
         self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
 
@@ -5214,22 +4861,12 @@ class HookProtocolTests(unittest.TestCase):
         workspace = Path(self.data_dir) / "clone-reservation"
         workspace.mkdir()
         source = "https://github.com/sample-owner/sample-repo.git"
-        first = (
-            f"git clone --depth 1 --no-checkout {source} {workspace / 'first'}"
-        )
-        second = (
-            f"git clone --depth 1 --no-checkout {source} {workspace / 'second'}"
-        )
-        self.assertEqual(
-            {}, self.exec_command(first, cwd=str(workspace), tool_use_id="same-clone-id")
-        )
-        collision = self.exec_command(
-            second, cwd=str(workspace), tool_use_id="same-clone-id"
-        )
+        first = f"git clone --depth 1 --no-checkout {source} {workspace / 'first'}"
+        second = f"git clone --depth 1 --no-checkout {source} {workspace / 'second'}"
+        self.assertEqual({}, self.exec_command(first, cwd=str(workspace), tool_use_id="same-clone-id"))
+        collision = self.exec_command(second, cwd=str(workspace), tool_use_id="same-clone-id")
         self.assertEqual("deny", collision["hookSpecificOutput"]["permissionDecision"])
-        self.assertIn(
-            "reservation", collision["hookSpecificOutput"]["permissionDecisionReason"]
-        )
+        self.assertIn("reservation", collision["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_exact_command_grant_preserves_exact_cwd(self) -> None:
         self.update_policy(enable_scoped_git_transactions=False)
@@ -5246,9 +4883,7 @@ class HookProtocolTests(unittest.TestCase):
         self.prompt(f"本轮明确授权执行 `{command}`。", cwd=str(repo))
         result = self.bash(command, cwd=str(nested))
         allowed = self.bash(command, cwd=str(repo))
-        self.assertNotEqual(
-            "deny", allowed["hookSpecificOutput"].get("permissionDecision")
-        )
+        self.assertNotEqual("deny", allowed["hookSpecificOutput"].get("permissionDecision"))
         self.assertEqual("deny", result["hookSpecificOutput"]["permissionDecision"])
 
     def test_push_rejects_multiple_origin_push_urls(self) -> None:
@@ -5394,9 +5029,7 @@ class HookProtocolTests(unittest.TestCase):
             binding["operation_digests"]["add"],
         )
 
-        changed = self.bash(
-            f"git -C {repo} add tests/test_other.py", cwd=self.data_dir
-        )
+        changed = self.bash(f"git -C {repo} add tests/test_other.py", cwd=self.data_dir)
         self.assertEqual("deny", changed["hookSpecificOutput"]["permissionDecision"])
 
         event = {
@@ -5409,30 +5042,20 @@ class HookProtocolTests(unittest.TestCase):
         runner_command = pretool["hookSpecificOutput"]["updatedInput"]["command"]
         rewritten_event = dict(event)
         rewritten_event["tool_input"] = {"command": runner_command}
-        permission = self.run_hook(
-            {"hook_event_name": "PermissionRequest", **rewritten_event}
-        )
-        self.assertNotEqual(
-            "deny", pretool["hookSpecificOutput"].get("permissionDecision")
-        )
+        permission = self.run_hook({"hook_event_name": "PermissionRequest", **rewritten_event})
+        self.assertNotEqual("deny", pretool["hookSpecificOutput"].get("permissionDecision"))
         self.assertNotEqual(
             "deny",
             permission["hookSpecificOutput"]["decision"].get("behavior"),
         )
         pending_state = json.loads(state_path.read_text(encoding="utf-8"))
-        self.assertIn(
-            "transaction-add", pending_state["pending_permission_authorizations"]
-        )
+        self.assertIn("transaction-add", pending_state["pending_permission_authorizations"])
         self.assertEqual(
             {},
-            self.run_hook(
-                {"hook_event_name": "Stop", "stop_hook_active": False}
-            ),
+            self.run_hook({"hook_event_name": "Stop", "stop_hook_active": False}),
         )
         self.assertTrue(state_path.exists())
-        token = pending_state["pending_permission_authorizations"][
-            "transaction-add"
-        ]["runner_token"]
+        token = pending_state["pending_permission_authorizations"]["transaction-add"]["runner_token"]
         environment = os.environ.copy()
         environment["PLUGIN_DATA"] = self.data_dir
         completed = subprocess.run(
@@ -5458,9 +5081,7 @@ class HookProtocolTests(unittest.TestCase):
         )
         completed_state = json.loads(state_path.read_text(encoding="utf-8"))
         scope_hash = next(iter(grant["bindings"]))
-        self.assertIn(
-            "add", completed_state["local_git_grant"]["consumed_operations"][scope_hash]
-        )
+        self.assertIn("add", completed_state["local_git_grant"]["consumed_operations"][scope_hash])
         replay = self.bash(add, cwd=self.data_dir)
         self.assertEqual("deny", replay["hookSpecificOutput"]["permissionDecision"])
 
@@ -5479,9 +5100,7 @@ class HookProtocolTests(unittest.TestCase):
         add = f"git -C {repo} add ok.txt ignored.log"
         commit = f'git -C {repo} commit -m "fix: stale index"'
         self.prompt(
-            "本轮批准你依次执行以下字面命令：\n"
-            f"`{add}`\n`{commit}`\n"
-            "权限只覆盖以上字面命令；其余 Git 操作均未授权。",
+            f"本轮批准你依次执行以下字面命令：\n`{add}`\n`{commit}`\n权限只覆盖以上字面命令；其余 Git 操作均未授权。",
             cwd=self.data_dir,
         )
         state_path = next(Path(self.data_dir).glob("session-*.json"))
@@ -5504,9 +5123,7 @@ class HookProtocolTests(unittest.TestCase):
         retry = self.bash(add, cwd=self.data_dir)
         self.assertEqual("deny", retry["hookSpecificOutput"]["permissionDecision"])
         next_step = self.bash(commit, cwd=self.data_dir)
-        self.assertEqual(
-            "deny", next_step["hookSpecificOutput"]["permissionDecision"]
-        )
+        self.assertEqual("deny", next_step["hookSpecificOutput"]["permissionDecision"])
 
     def test_tool_response_status_requires_explicit_integer_status(self) -> None:
         module = __import__("control_plane_hook")
@@ -5539,9 +5156,7 @@ class HookProtocolTests(unittest.TestCase):
         add = f"git -C {repo} add README.md"
         commit = f'git -C {repo} commit -m "fix: verified add"'
         self.prompt(
-            "本轮批准你依次执行以下字面命令：\n"
-            f"`{add}`\n`{commit}`\n"
-            "权限只覆盖以上字面命令；其余 Git 操作均未授权。",
+            f"本轮批准你依次执行以下字面命令：\n`{add}`\n`{commit}`\n权限只覆盖以上字面命令；其余 Git 操作均未授权。",
             cwd=self.data_dir,
         )
         state_path = next(Path(self.data_dir).glob("session-*.json"))
@@ -5558,9 +5173,7 @@ class HookProtocolTests(unittest.TestCase):
         scope_hash = next(iter(grant["bindings"]))
         self.assertIn("add", grant["consumed_operations"][scope_hash])
         next_step = self.bash(commit, cwd=self.data_dir)
-        self.assertNotEqual(
-            "deny", next_step["hookSpecificOutput"].get("permissionDecision")
-        )
+        self.assertNotEqual("deny", next_step["hookSpecificOutput"].get("permissionDecision"))
         environment = os.environ.copy()
         environment["PLUGIN_DATA"] = self.data_dir
         replay = subprocess.run(
@@ -5588,9 +5201,7 @@ class HookProtocolTests(unittest.TestCase):
         add = f"git -C {repo} add README.md"
         commit = f'git -C {repo} commit -m "fix: repeat"'
         self.prompt(
-            "本轮批准你依次执行以下字面命令：\n"
-            f"`{add}`\n`{commit}`\n"
-            "权限只覆盖以上字面命令；其余 Git 操作均未授权。",
+            f"本轮批准你依次执行以下字面命令：\n`{add}`\n`{commit}`\n权限只覆盖以上字面命令；其余 Git 操作均未授权。",
             cwd=self.data_dir,
         )
         event = {
@@ -5611,17 +5222,11 @@ class HookProtocolTests(unittest.TestCase):
             len(list(Path(self.data_dir).glob(".git-runner-request-*.json"))),
         )
         direct = self.run_hook({"hook_event_name": "PermissionRequest", **event})
-        self.assertEqual(
-            "deny", direct["hookSpecificOutput"]["decision"]["behavior"]
-        )
+        self.assertEqual("deny", direct["hookSpecificOutput"]["decision"]["behavior"])
         rewritten = dict(event)
         rewritten["tool_input"] = {"command": first_runner}
-        allowed = self.run_hook(
-            {"hook_event_name": "PermissionRequest", **rewritten}
-        )
-        self.assertEqual(
-            "allow", allowed["hookSpecificOutput"]["decision"]["behavior"]
-        )
+        allowed = self.run_hook({"hook_event_name": "PermissionRequest", **rewritten})
+        self.assertEqual("allow", allowed["hookSpecificOutput"]["decision"]["behavior"])
 
     def test_transaction_allows_only_one_inflight_runner(self) -> None:
         repo = Path(self.data_dir) / "single-inflight"
@@ -5631,9 +5236,7 @@ class HookProtocolTests(unittest.TestCase):
         add = f"git -C {repo} add README.md"
         commit = f'git -C {repo} commit -m "fix: one ticket"'
         self.prompt(
-            "本轮批准你依次执行以下字面命令：\n"
-            f"`{add}`\n`{commit}`\n"
-            "权限只覆盖以上字面命令；其余 Git 操作均未授权。",
+            f"本轮批准你依次执行以下字面命令：\n`{add}`\n`{commit}`\n权限只覆盖以上字面命令；其余 Git 操作均未授权。",
             cwd=self.data_dir,
         )
         add_event = {
@@ -5642,9 +5245,7 @@ class HookProtocolTests(unittest.TestCase):
             "tool_input": {"command": add},
             "cwd": self.data_dir,
         }
-        add_result = self.run_hook(
-            {"hook_event_name": "PreToolUse", **add_event}
-        )
+        add_result = self.run_hook({"hook_event_name": "PreToolUse", **add_event})
         self.assertTrue(add_result["hookSpecificOutput"]["updatedInput"]["command"])
         commit_result = self.run_hook(
             {
@@ -5655,9 +5256,7 @@ class HookProtocolTests(unittest.TestCase):
                 "cwd": self.data_dir,
             }
         )
-        self.assertEqual(
-            "deny", commit_result["hookSpecificOutput"]["permissionDecision"]
-        )
+        self.assertEqual("deny", commit_result["hookSpecificOutput"]["permissionDecision"])
         self.assertEqual(
             1,
             len(list(Path(self.data_dir).glob(".git-runner-request-*.json"))),
@@ -5671,9 +5270,7 @@ class HookProtocolTests(unittest.TestCase):
         add = f"git -C {repo} add README.md"
         commit = f'git -C {repo} commit -m "fix: reserved"'
         self.prompt(
-            "本轮批准你依次执行以下字面命令：\n"
-            f"`{add}`\n`{commit}`\n"
-            "权限只覆盖以上字面命令；其余 Git 操作均未授权。",
+            f"本轮批准你依次执行以下字面命令：\n`{add}`\n`{commit}`\n权限只覆盖以上字面命令；其余 Git 操作均未授权。",
             cwd=self.data_dir,
         )
         tool_use_id = "reused-transaction-tool"
@@ -5688,9 +5285,7 @@ class HookProtocolTests(unittest.TestCase):
         state_path = next(Path(self.data_dir).glob("session-*.json"))
         before_state = json.loads(state_path.read_text(encoding="utf-8"))
         before_permission = before_state["pending_permission_authorizations"][tool_use_id]
-        request_path = Path(self.data_dir) / (
-            f".git-runner-request-{before_permission['runner_token']}.json"
-        )
+        request_path = Path(self.data_dir) / (f".git-runner-request-{before_permission['runner_token']}.json")
         before_ticket = request_path.read_bytes()
 
         collision = self.run_hook(
@@ -5724,9 +5319,7 @@ class HookProtocolTests(unittest.TestCase):
         add = f"git -C {repo} add README.md"
         commit = f'git -C {repo} commit -m "fix: ticket"'
         self.prompt(
-            "本轮批准你依次执行以下字面命令：\n"
-            f"`{add}`\n`{commit}`\n"
-            "权限只覆盖以上字面命令；其余 Git 操作均未授权。",
+            f"本轮批准你依次执行以下字面命令：\n`{add}`\n`{commit}`\n权限只覆盖以上字面命令；其余 Git 操作均未授权。",
             cwd=self.data_dir,
         )
         event = {
@@ -5757,9 +5350,7 @@ class HookProtocolTests(unittest.TestCase):
         add = f"git -C {repo} add README.md"
         commit = f'git -C {repo} commit -m "fix: claimed"'
         self.prompt(
-            "本轮批准你依次执行以下字面命令：\n"
-            f"`{add}`\n`{commit}`\n"
-            "权限只覆盖以上字面命令；其余 Git 操作均未授权。",
+            f"本轮批准你依次执行以下字面命令：\n`{add}`\n`{commit}`\n权限只覆盖以上字面命令；其余 Git 操作均未授权。",
             cwd=self.data_dir,
         )
         event = {
@@ -5772,9 +5363,7 @@ class HookProtocolTests(unittest.TestCase):
         runner_command = pretool["hookSpecificOutput"]["updatedInput"]["command"]
         state_path = next(Path(self.data_dir).glob("session-*.json"))
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        state["pending_permission_authorizations"]["claimed-ticket-add"][
-            "runner_claimed_at"
-        ] = time.time()
+        state["pending_permission_authorizations"]["claimed-ticket-add"]["runner_claimed_at"] = time.time()
         state_path.write_text(json.dumps(state), encoding="utf-8")
         rewritten = dict(event)
         rewritten["tool_input"] = {"command": runner_command}
@@ -5792,9 +5381,7 @@ class HookProtocolTests(unittest.TestCase):
         add = f"git -C {repo} add README.md"
         commit = f'git -C {repo} commit -m "fix: altered runner"'
         self.prompt(
-            "本轮批准你依次执行以下字面命令：\n"
-            f"`{add}`\n`{commit}`\n"
-            "权限只覆盖以上字面命令；其余 Git 操作均未授权。",
+            f"本轮批准你依次执行以下字面命令：\n`{add}`\n`{commit}`\n权限只覆盖以上字面命令；其余 Git 操作均未授权。",
             cwd=self.data_dir,
         )
         event = {
@@ -5820,9 +5407,7 @@ class HookProtocolTests(unittest.TestCase):
         failed_state = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertIsNone(failed_state["local_git_grant"])
         self.assertEqual({}, failed_state["pending_permission_authorizations"])
-        self.assertEqual(
-            [], list(Path(self.data_dir).glob(".git-runner-request-*.json"))
-        )
+        self.assertEqual([], list(Path(self.data_dir).glob(".git-runner-request-*.json")))
 
     def test_runner_rejects_ticket_tampering_and_clears_transaction_tickets(
         self,
@@ -5835,9 +5420,7 @@ class HookProtocolTests(unittest.TestCase):
         add = f"git -C {repo} add allowed.txt"
         commit = f'git -C {repo} commit -m "fix: ticket"'
         self.prompt(
-            "本轮批准你依次执行以下字面命令：\n"
-            f"`{add}`\n`{commit}`\n"
-            "权限只覆盖以上字面命令；其余 Git 操作均未授权。",
+            f"本轮批准你依次执行以下字面命令：\n`{add}`\n`{commit}`\n权限只覆盖以上字面命令；其余 Git 操作均未授权。",
             cwd=self.data_dir,
         )
         event = {
@@ -5904,9 +5487,7 @@ class HookProtocolTests(unittest.TestCase):
         commit = f'git -C {repo} commit -m "fix: remote drift"'
         push = f"git -C {repo} push origin main"
         self.prompt(
-            "本轮批准你依次执行以下字面命令：\n"
-            f"`{commit}`\n`{push}`\n"
-            "权限只覆盖以上字面命令；其余 Git 操作均未授权。",
+            f"本轮批准你依次执行以下字面命令：\n`{commit}`\n`{push}`\n权限只覆盖以上字面命令；其余 Git 操作均未授权。",
             cwd=self.data_dir,
         )
         event = {
@@ -5919,12 +5500,8 @@ class HookProtocolTests(unittest.TestCase):
         runner_command = pretool["hookSpecificOutput"]["updatedInput"]["command"]
         rewritten = dict(event)
         rewritten["tool_input"] = {"command": runner_command}
-        permission = self.run_hook(
-            {"hook_event_name": "PermissionRequest", **rewritten}
-        )
-        self.assertEqual(
-            "allow", permission["hookSpecificOutput"]["decision"]["behavior"]
-        )
+        permission = self.run_hook({"hook_event_name": "PermissionRequest", **rewritten})
+        self.assertEqual("allow", permission["hookSpecificOutput"]["decision"]["behavior"])
         subprocess.run(
             [
                 "git",
@@ -5939,9 +5516,7 @@ class HookProtocolTests(unittest.TestCase):
         )
         state_path = next(Path(self.data_dir).glob("session-*.json"))
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        token = state["pending_permission_authorizations"][
-            "runner-remote-drift-push"
-        ]["runner_token"]
+        token = state["pending_permission_authorizations"]["runner-remote-drift-push"]["runner_token"]
         completed = subprocess.run(
             [
                 sys.executable,
@@ -5983,9 +5558,7 @@ class HookProtocolTests(unittest.TestCase):
             ],
             check=True,
         )
-        subprocess.run(
-            ["git", "-C", str(repo), "branch", "-M", "main"], check=True
-        )
+        subprocess.run(["git", "-C", str(repo), "branch", "-M", "main"], check=True)
         source_oid = subprocess.run(
             ["git", "-C", str(repo), "rev-parse", "HEAD"],
             text=True,
@@ -5999,9 +5572,7 @@ class HookProtocolTests(unittest.TestCase):
         commit = f'git -C {repo} commit -m "fix: pinned remote"'
         push = f"git -C {repo} push -u origin HEAD"
         self.prompt(
-            "本轮批准你依次执行以下字面命令：\n"
-            f"`{commit}`\n`{push}`\n"
-            "权限只覆盖以上字面命令；其余 Git 操作均未授权。",
+            f"本轮批准你依次执行以下字面命令：\n`{commit}`\n`{push}`\n权限只覆盖以上字面命令；其余 Git 操作均未授权。",
             cwd=self.data_dir,
         )
         event = {
@@ -6014,12 +5585,8 @@ class HookProtocolTests(unittest.TestCase):
         runner_command = pretool["hookSpecificOutput"]["updatedInput"]["command"]
         rewritten = dict(event)
         rewritten["tool_input"] = {"command": runner_command}
-        permission = self.run_hook(
-            {"hook_event_name": "PermissionRequest", **rewritten}
-        )
-        self.assertEqual(
-            "allow", permission["hookSpecificOutput"]["decision"]["behavior"]
-        )
+        permission = self.run_hook({"hook_event_name": "PermissionRequest", **rewritten})
+        self.assertEqual("allow", permission["hookSpecificOutput"]["decision"]["behavior"])
         state_path = next(Path(self.data_dir).glob("session-*.json"))
         state = json.loads(state_path.read_text(encoding="utf-8"))
         pending = state["pending_permission_authorizations"]["runner-pinned-push"]
@@ -6046,11 +5613,7 @@ class HookProtocolTests(unittest.TestCase):
             if "push" in argv:
                 captured["argv"] = list(argv)
                 captured["env"] = dict(kwargs.get("env") or {})
-                git_dir = next(
-                    arg.removeprefix("--git-dir=")
-                    for arg in argv
-                    if arg.startswith("--git-dir=")
-                )
+                git_dir = next(arg.removeprefix("--git-dir=") for arg in argv if arg.startswith("--git-dir="))
                 effective_rewrite = real_run(
                     [
                         "git",
@@ -6068,12 +5631,10 @@ class HookProtocolTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, "", "")
             return real_run(argv, **kwargs)
 
-        with mock.patch.object(
-            module, "_claim_git_runner_request", side_effect=claim_then_change_remote
-        ), mock.patch.object(
-            module, "_set_git_push_upstream", return_value=True
-        ) as set_upstream, mock.patch.object(
-            module.subprocess, "run", side_effect=capture_child
+        with (
+            mock.patch.object(module, "_claim_git_runner_request", side_effect=claim_then_change_remote),
+            mock.patch.object(module, "_set_git_push_upstream", return_value=True) as set_upstream,
+            mock.patch.object(module.subprocess, "run", side_effect=capture_child),
         ):
             self.assertEqual(0, module._run_approved_git(token))
 
@@ -6090,9 +5651,7 @@ class HookProtocolTests(unittest.TestCase):
         self.assertEqual("1", child_env["GIT_CONFIG_NOSYSTEM"])
         self.assertIn("GIT_CONFIG_GLOBAL", child_env)
         self.assertNotIn("GIT_CONFIG_COUNT", child_env)
-        self.assertFalse(
-            any(key.startswith("GIT_CONFIG_KEY_") for key in child_env)
-        )
+        self.assertFalse(any(key.startswith("GIT_CONFIG_KEY_") for key in child_env))
         self.assertFalse(captured["has_url_rewrite"])
         set_upstream.assert_called_once()
         actual_origin = real_run(
@@ -6128,9 +5687,7 @@ class HookProtocolTests(unittest.TestCase):
             ],
             check=True,
         )
-        subprocess.run(
-            ["git", "-C", str(repo), "branch", "-M", "main"], check=True
-        )
+        subprocess.run(["git", "-C", str(repo), "branch", "-M", "main"], check=True)
         subprocess.run(
             ["git", "-C", str(repo), "remote", "add", "origin", original_url],
             check=True,
@@ -6138,9 +5695,7 @@ class HookProtocolTests(unittest.TestCase):
         commit = f'git -C {repo} commit -m "fix: isolated rewrite"'
         push = f"git -C {repo} push origin main"
         self.prompt(
-            "本轮批准你依次执行以下字面命令：\n"
-            f"`{commit}`\n`{push}`\n"
-            "权限只覆盖以上字面命令；其余 Git 操作均未授权。",
+            f"本轮批准你依次执行以下字面命令：\n`{commit}`\n`{push}`\n权限只覆盖以上字面命令；其余 Git 操作均未授权。",
             cwd=self.data_dir,
         )
         event = {
@@ -6152,17 +5707,11 @@ class HookProtocolTests(unittest.TestCase):
         pretool = self.run_hook({"hook_event_name": "PreToolUse", **event})
         runner_command = pretool["hookSpecificOutput"]["updatedInput"]["command"]
         rewritten = {**event, "tool_input": {"command": runner_command}}
-        permission = self.run_hook(
-            {"hook_event_name": "PermissionRequest", **rewritten}
-        )
-        self.assertEqual(
-            "allow", permission["hookSpecificOutput"]["decision"]["behavior"]
-        )
+        permission = self.run_hook({"hook_event_name": "PermissionRequest", **rewritten})
+        self.assertEqual("allow", permission["hookSpecificOutput"]["decision"]["behavior"])
         state_path = next(Path(self.data_dir).glob("session-*.json"))
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        token = state["pending_permission_authorizations"][
-            "runner-isolated-rewrite-push"
-        ]["runner_token"]
+        token = state["pending_permission_authorizations"]["runner-isolated-rewrite-push"]["runner_token"]
 
         real_run = subprocess.run
         real_snapshot = module._git_url_rewrite_snapshot
@@ -6184,17 +5733,11 @@ class HookProtocolTests(unittest.TestCase):
             )
             return snapshot
 
-        def capture_child(
-            argv: list[str], **kwargs: object
-        ) -> subprocess.CompletedProcess[str]:
+        def capture_child(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             if "push" in argv:
                 captured["argv"] = list(argv)
                 captured["cwd"] = kwargs.get("cwd")
-                git_dir = next(
-                    arg.removeprefix("--git-dir=")
-                    for arg in argv
-                    if arg.startswith("--git-dir=")
-                )
+                git_dir = next(arg.removeprefix("--git-dir=") for arg in argv if arg.startswith("--git-dir="))
                 effective_rewrite = real_run(
                     [
                         "git",
@@ -6212,9 +5755,10 @@ class HookProtocolTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, "", "")
             return real_run(argv, **kwargs)
 
-        with mock.patch.object(
-            module, "_git_url_rewrite_snapshot", side_effect=snapshot_then_add_rewrite
-        ), mock.patch.object(module.subprocess, "run", side_effect=capture_child):
+        with (
+            mock.patch.object(module, "_git_url_rewrite_snapshot", side_effect=snapshot_then_add_rewrite),
+            mock.patch.object(module.subprocess, "run", side_effect=capture_child),
+        ):
             self.assertEqual(0, module._run_approved_git(token))
 
         child_argv = captured["argv"]
@@ -6232,7 +5776,7 @@ class HookProtocolTests(unittest.TestCase):
             "\thelper = fixture-helper\n"
             "[http]\n"
             "\tsslVerify = true\n"
-            "[url \"https://redirected.invalid/\"]\n"
+            '[url "https://redirected.invalid/"]\n'
             "\tinsteadOf = https://github.com/\n",
             encoding="utf-8",
         )
@@ -6267,9 +5811,7 @@ class HookProtocolTests(unittest.TestCase):
             ],
             check=True,
         )
-        subprocess.run(
-            ["git", "-C", str(repo), "checkout", "--detach", "-q"], check=True
-        )
+        subprocess.run(["git", "-C", str(repo), "checkout", "--detach", "-q"], check=True)
         with self.assertRaisesRegex(RuntimeError, "detached HEAD"):
             module._git_push_source_snapshot(
                 {"scope": str(repo), "refspec": "HEAD"},
@@ -6288,11 +5830,9 @@ class HookProtocolTests(unittest.TestCase):
         if initialized.returncode != 0:
             self.skipTest("installed Git does not support SHA-256 repositories")
         self.seed_git_branch(repo)
-        branch, source_oid, object_dir, object_format = (
-            module._git_push_source_snapshot(
-                {"scope": str(repo), "refspec": "HEAD"},
-                module._git_runner_base_environment(),
-            )
+        branch, source_oid, object_dir, object_format = module._git_push_source_snapshot(
+            {"scope": str(repo), "refspec": "HEAD"},
+            module._git_runner_base_environment(),
         )
         self.assertEqual("main", branch)
         self.assertEqual(64, len(source_oid))
@@ -6326,9 +5866,7 @@ class HookProtocolTests(unittest.TestCase):
         commit = f'git -C {repo} commit -m "fix: source drift"'
         push = f"git -C {repo} push origin main"
         self.prompt(
-            "本轮批准你依次执行以下字面命令：\n"
-            f"`{commit}`\n`{push}`\n"
-            "权限只覆盖以上字面命令；其余 Git 操作均未授权。",
+            f"本轮批准你依次执行以下字面命令：\n`{commit}`\n`{push}`\n权限只覆盖以上字面命令；其余 Git 操作均未授权。",
             cwd=self.data_dir,
         )
         event = {
@@ -6340,25 +5878,11 @@ class HookProtocolTests(unittest.TestCase):
         pretool = self.run_hook({"hook_event_name": "PreToolUse", **event})
         runner_command = pretool["hookSpecificOutput"]["updatedInput"]["command"]
         rewritten = {**event, "tool_input": {"command": runner_command}}
-        permission = self.run_hook(
-            {"hook_event_name": "PermissionRequest", **rewritten}
-        )
-        self.assertEqual(
-            "allow", permission["hookSpecificOutput"]["decision"]["behavior"]
-        )
-        state = json.loads(
-            next(Path(self.data_dir).glob("session-*.json")).read_text(
-                encoding="utf-8"
-            )
-        )
-        token = state["pending_permission_authorizations"][
-            "runner-source-drift-push"
-        ]["runner_token"]
-        request = json.loads(
-            (Path(self.data_dir) / f".git-runner-request-{token}.json").read_text(
-                encoding="utf-8"
-            )
-        )
+        permission = self.run_hook({"hook_event_name": "PermissionRequest", **rewritten})
+        self.assertEqual("allow", permission["hookSpecificOutput"]["decision"]["behavior"])
+        state = json.loads(next(Path(self.data_dir).glob("session-*.json")).read_text(encoding="utf-8"))
+        token = state["pending_permission_authorizations"]["runner-source-drift-push"]["runner_token"]
+        request = json.loads((Path(self.data_dir) / f".git-runner-request-{token}.json").read_text(encoding="utf-8"))
         self.assertEqual(original_oid, request["push_source"]["oid"])
 
         (repo / "README.md").write_text("drifted\n", encoding="utf-8")
@@ -6382,9 +5906,7 @@ class HookProtocolTests(unittest.TestCase):
         pushed = False
         real_run = subprocess.run
 
-        def capture_child(
-            argv: list[str], **kwargs: object
-        ) -> subprocess.CompletedProcess[str]:
+        def capture_child(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             nonlocal pushed
             if "push" in argv:
                 pushed = True
@@ -6410,9 +5932,7 @@ class HookProtocolTests(unittest.TestCase):
         commit = f'git -C {repo} commit -m "fix: url rewrite"'
         push = f"git -C {repo} push origin main"
         self.prompt(
-            "本轮批准你依次执行以下字面命令：\n"
-            f"`{commit}`\n`{push}`\n"
-            "权限只覆盖以上字面命令；其余 Git 操作均未授权。",
+            f"本轮批准你依次执行以下字面命令：\n`{commit}`\n`{push}`\n权限只覆盖以上字面命令；其余 Git 操作均未授权。",
             cwd=self.data_dir,
         )
         event = {
@@ -6425,17 +5945,11 @@ class HookProtocolTests(unittest.TestCase):
         runner_command = pretool["hookSpecificOutput"]["updatedInput"]["command"]
         rewritten = dict(event)
         rewritten["tool_input"] = {"command": runner_command}
-        permission = self.run_hook(
-            {"hook_event_name": "PermissionRequest", **rewritten}
-        )
-        self.assertEqual(
-            "allow", permission["hookSpecificOutput"]["decision"]["behavior"]
-        )
+        permission = self.run_hook({"hook_event_name": "PermissionRequest", **rewritten})
+        self.assertEqual("allow", permission["hookSpecificOutput"]["decision"]["behavior"])
         state_path = next(Path(self.data_dir).glob("session-*.json"))
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        token = state["pending_permission_authorizations"][
-            "runner-url-rewrite-push"
-        ]["runner_token"]
+        token = state["pending_permission_authorizations"]["runner-url-rewrite-push"]["runner_token"]
 
         real_run = subprocess.run
         real_claim = module._claim_git_runner_request
@@ -6456,18 +5970,17 @@ class HookProtocolTests(unittest.TestCase):
                 check=True,
             )
 
-        def capture_child(
-            argv: list[str], **kwargs: object
-        ) -> subprocess.CompletedProcess[str]:
+        def capture_child(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             nonlocal pushed
             if "push" in argv:
                 pushed = True
                 return subprocess.CompletedProcess(argv, 0, "", "")
             return real_run(argv, **kwargs)
 
-        with mock.patch.object(
-            module, "_claim_git_runner_request", side_effect=claim_then_add_rewrite
-        ), mock.patch.object(module.subprocess, "run", side_effect=capture_child):
+        with (
+            mock.patch.object(module, "_claim_git_runner_request", side_effect=claim_then_add_rewrite),
+            mock.patch.object(module.subprocess, "run", side_effect=capture_child),
+        ):
             self.assertEqual(126, module._run_approved_git(token))
         self.assertFalse(pushed)
         self.run_hook(
@@ -6490,30 +6003,26 @@ class HookProtocolTests(unittest.TestCase):
         }
         pinned = "https://github.com/sample-owner/approved.git"
         environment = {"GIT_TERMINAL_PROMPT": "0"}
-        with mock.patch.object(
-            module, "_git_remote_urls", return_value=(pinned,)
-        ) as remote_urls, mock.patch.object(
-            module,
-            "_git_remote_identities",
-            return_value=(module._git_push_url_identity(pinned),),
-        ) as remote_identities, mock.patch.object(
-            module.subprocess,
-            "run",
-            side_effect=(
-                subprocess.CompletedProcess([], 0),
-                subprocess.CompletedProcess([], 0),
-                subprocess.CompletedProcess([], 0),
-            ),
-        ) as run:
-            self.assertTrue(
-                module._set_git_push_upstream(
-                    candidate, pinned, environment, "feature/release"
-                )
-            )
+        with (
+            mock.patch.object(module, "_git_remote_urls", return_value=(pinned,)) as remote_urls,
+            mock.patch.object(
+                module,
+                "_git_remote_identities",
+                return_value=(module._git_push_url_identity(pinned),),
+            ) as remote_identities,
+            mock.patch.object(
+                module.subprocess,
+                "run",
+                side_effect=(
+                    subprocess.CompletedProcess([], 0),
+                    subprocess.CompletedProcess([], 0),
+                    subprocess.CompletedProcess([], 0),
+                ),
+            ) as run,
+        ):
+            self.assertTrue(module._set_git_push_upstream(candidate, pinned, environment, "feature/release"))
         self.assertEqual(3, run.call_count)
-        remote_urls.assert_called_once_with(
-            self.data_dir, "origin", environment=environment
-        )
+        remote_urls.assert_called_once_with(self.data_dir, "origin", environment=environment)
         remote_identities.assert_called_once_with(
             self.data_dir,
             "origin",
@@ -6524,35 +6033,32 @@ class HookProtocolTests(unittest.TestCase):
         self.assertIn("branch.feature/release.remote", run.call_args_list[1].args[0])
         self.assertIn("branch.feature/release.merge", run.call_args_list[2].args[0])
 
-        with mock.patch.object(
-            module,
-            "_git_remote_urls",
-            return_value=("https://github.com/sample-owner/changed.git",),
-        ), mock.patch.object(module.subprocess, "run") as blocked_run:
-            self.assertFalse(
-                module._set_git_push_upstream(
-                    candidate, pinned, environment, "feature/release"
-                )
-            )
+        with (
+            mock.patch.object(
+                module,
+                "_git_remote_urls",
+                return_value=("https://github.com/sample-owner/changed.git",),
+            ),
+            mock.patch.object(module.subprocess, "run") as blocked_run,
+        ):
+            self.assertFalse(module._set_git_push_upstream(candidate, pinned, environment, "feature/release"))
         blocked_run.assert_not_called()
 
         tag_candidate = {**candidate, "refspec": "v0.2.6"}
-        with mock.patch.object(
-            module, "_git_remote_urls", return_value=(pinned,)
-        ), mock.patch.object(
-            module,
-            "_git_remote_identities",
-            return_value=(module._git_push_url_identity(pinned),),
-        ), mock.patch.object(
-            module.subprocess,
-            "run",
-            return_value=subprocess.CompletedProcess([], 1),
-        ) as tag_run:
-            self.assertFalse(
-                module._set_git_push_upstream(
-                    tag_candidate, pinned, environment, "v0.2.6"
-                )
-            )
+        with (
+            mock.patch.object(module, "_git_remote_urls", return_value=(pinned,)),
+            mock.patch.object(
+                module,
+                "_git_remote_identities",
+                return_value=(module._git_push_url_identity(pinned),),
+            ),
+            mock.patch.object(
+                module.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 1),
+            ) as tag_run,
+        ):
+            self.assertFalse(module._set_git_push_upstream(tag_candidate, pinned, environment, "v0.2.6"))
         self.assertEqual(1, tag_run.call_count)
         self.assertIn("refs/heads/v0.2.6", tag_run.call_args.args[0])
 
@@ -6596,9 +6102,7 @@ class HookProtocolTests(unittest.TestCase):
         add = f"git -C {repo} add README.md"
         commit = f'git -C {repo} commit -m "fix: receipt"'
         self.prompt(
-            "本轮批准你依次执行以下字面命令：\n"
-            f"`{add}`\n`{commit}`\n"
-            "权限只覆盖以上字面命令；其余 Git 操作均未授权。",
+            f"本轮批准你依次执行以下字面命令：\n`{add}`\n`{commit}`\n权限只覆盖以上字面命令；其余 Git 操作均未授权。",
             cwd=self.data_dir,
         )
         event = {
@@ -6632,9 +6136,7 @@ class HookProtocolTests(unittest.TestCase):
         clone = f"git clone {source} {destination}"
         switch = f"git -C {destination} switch -c fix/authorization-flow"
         prompt_result = self.prompt(
-            "本轮批准你依次执行以下字面命令：\n"
-            f"`{clone}`\n`{switch}`\n"
-            "权限只覆盖以上字面命令；其余 Git 操作均未授权。",
+            f"本轮批准你依次执行以下字面命令：\n`{clone}`\n`{switch}`\n权限只覆盖以上字面命令；其余 Git 操作均未授权。",
             cwd=str(workspace),
         )
         self.assertEqual({}, prompt_result)
@@ -6654,13 +6156,9 @@ class HookProtocolTests(unittest.TestCase):
             "tool_input": {"cmd": clone, "workdir": str(workspace)},
             "cwd": str(workspace),
         }
-        clone_pretool = self.run_hook(
-            {"hook_event_name": "PreToolUse", **clone_event}
-        )
+        clone_pretool = self.run_hook({"hook_event_name": "PreToolUse", **clone_event})
         clone_state = json.loads(state_path.read_text(encoding="utf-8"))
-        clone_permission = self.run_hook(
-            {"hook_event_name": "PermissionRequest", **clone_event}
-        )
+        clone_permission = self.run_hook({"hook_event_name": "PermissionRequest", **clone_event})
         self.assertNotEqual(
             "deny",
             clone_pretool["hookSpecificOutput"].get("permissionDecision"),
@@ -6668,9 +6166,7 @@ class HookProtocolTests(unittest.TestCase):
                 "result": clone_pretool,
                 "expected_digest": clone_digest,
                 "current_turn_id": clone_state.get("current_turn_id"),
-                "authorization_hashes": clone_state.get(
-                    "dangerous_authorization_hashes"
-                ),
+                "authorization_hashes": clone_state.get("dangerous_authorization_hashes"),
             },
         )
         self.assertNotEqual(
@@ -6701,12 +6197,8 @@ class HookProtocolTests(unittest.TestCase):
             "tool_input": {"cmd": switch, "workdir": str(workspace)},
             "cwd": str(workspace),
         }
-        switch_pretool = self.run_hook(
-            {"hook_event_name": "PreToolUse", **switch_event}
-        )
-        self.assertNotEqual(
-            "deny", switch_pretool["hookSpecificOutput"].get("permissionDecision")
-        )
+        switch_pretool = self.run_hook({"hook_event_name": "PreToolUse", **switch_event})
+        self.assertNotEqual("deny", switch_pretool["hookSpecificOutput"].get("permissionDecision"))
         altered = self.exec_command(
             f"git -C {destination} switch -c fix/other",
             cwd=str(workspace),
@@ -6717,10 +6209,7 @@ class HookProtocolTests(unittest.TestCase):
     def test_prompt_absolute_paths_ignores_uri_spans(self) -> None:
         module = __import__("control_plane_hook")
         local_path = str(Path(self.data_dir) / "fresh-checkout")
-        prompt = (
-            "git clone https://github.com/sample-owner/exact-clone.git "
-            f"{local_path}"
-        )
+        prompt = f"git clone https://github.com/sample-owner/exact-clone.git {local_path}"
         self.assertEqual(
             [module._normalized_cwd(local_path)],
             module._prompt_absolute_paths(prompt),
@@ -6785,10 +6274,7 @@ class HookProtocolTests(unittest.TestCase):
         state_path = next(Path(self.data_dir).glob("session-*.json"))
         grant = json.loads(state_path.read_text(encoding="utf-8"))["local_git_grant"]
         self.assertIsInstance(grant, dict)
-        mappings = {
-            binding["scope"]: binding["target"]
-            for binding in grant["bindings"].values()
-        }
+        mappings = {binding["scope"]: binding["target"] for binding in grant["bindings"].values()}
         self.assertEqual(
             {
                 module._normalized_cwd(str(repo_a)): "sample-owner/alpha",
@@ -6806,9 +6292,7 @@ class HookProtocolTests(unittest.TestCase):
             "随后继续执行上一条已授权的发布事务。",
             cwd=self.data_dir,
         )
-        continued = json.loads(state_path.read_text(encoding="utf-8"))[
-            "local_git_grant"
-        ]
+        continued = json.loads(state_path.read_text(encoding="utf-8"))["local_git_grant"]
         self.assertEqual(initial_transaction_id, continued["transaction_id"])
         self.assertEqual(initial_bindings, continued["bindings"])
         self.assertEqual(initial_issued_at, continued["issued_at"])
@@ -6829,9 +6313,7 @@ class HookProtocolTests(unittest.TestCase):
         state = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertIsNone(state["local_git_grant"])
         altered = self.bash(f"git -C {repo} add private.txt", cwd=self.data_dir)
-        self.assertEqual(
-            "deny", altered["hookSpecificOutput"]["permissionDecision"]
-        )
+        self.assertEqual("deny", altered["hookSpecificOutput"]["permissionDecision"])
 
     def test_heterogeneous_exact_transaction_retires_after_each_scope_finishes(self) -> None:
         module = __import__("control_plane_hook")
@@ -6857,19 +6339,11 @@ class HookProtocolTests(unittest.TestCase):
             },
             "consumed_operations": {},
         }
-        self.assertEqual(
-            {"add"}, module._git_grant_effective_operations(grant, scope_a)
-        )
-        self.assertEqual(
-            {"commit"}, module._git_grant_effective_operations(grant, scope_b)
-        )
-        module._consume_git_grant(
-            grant, {"scope_hash": scope_a, "operation": "add"}
-        )
+        self.assertEqual({"add"}, module._git_grant_effective_operations(grant, scope_a))
+        self.assertEqual({"commit"}, module._git_grant_effective_operations(grant, scope_b))
+        module._consume_git_grant(grant, {"scope_hash": scope_a, "operation": "add"})
         self.assertTrue(module._git_grant_usable(grant, "fixture-session"))
-        module._consume_git_grant(
-            grant, {"scope_hash": scope_b, "operation": "commit"}
-        )
+        module._consume_git_grant(grant, {"scope_hash": scope_b, "operation": "commit"})
         self.assertFalse(module._git_grant_usable(grant, "fixture-session"))
 
     def test_exact_multi_repo_transaction_rejects_cross_scope_operations(self) -> None:
@@ -6885,14 +6359,8 @@ class HookProtocolTests(unittest.TestCase):
             )
         add_a = f"git -C {repo_a} add README.md"
         commit_b = f'git -C {repo_b} commit -m "fix: scoped"'
-        create_a = (
-            "gh repo create sample-owner/exact-scope-a --private "
-            f"--source {repo_a} --remote origin"
-        )
-        create_b = (
-            "gh repo create sample-owner/exact-scope-b --private "
-            f"--source {repo_b} --remote origin"
-        )
+        create_a = f"gh repo create sample-owner/exact-scope-a --private --source {repo_a} --remote origin"
+        create_b = f"gh repo create sample-owner/exact-scope-b --private --source {repo_b} --remote origin"
         self.prompt(
             "本轮批准你依次执行以下字面命令：\n"
             f"`{add_a}`\n`{commit_b}`\n`{create_a}`\n`{create_b}`\n"
@@ -6900,21 +6368,11 @@ class HookProtocolTests(unittest.TestCase):
             cwd=self.data_dir,
         )
         allowed_add = self.probe_transaction_command(add_a, cwd=self.data_dir)
-        allowed_commit = self.probe_transaction_command(
-            commit_b, cwd=self.data_dir
-        )
-        allowed_create_a = self.probe_transaction_command(
-            create_a, cwd=self.data_dir
-        )
-        allowed_create_b = self.probe_transaction_command(
-            create_b, cwd=self.data_dir
-        )
-        self.assertNotEqual(
-            "deny", allowed_add["hookSpecificOutput"].get("permissionDecision")
-        )
-        self.assertNotEqual(
-            "deny", allowed_commit["hookSpecificOutput"].get("permissionDecision")
-        )
+        allowed_commit = self.probe_transaction_command(commit_b, cwd=self.data_dir)
+        allowed_create_a = self.probe_transaction_command(create_a, cwd=self.data_dir)
+        allowed_create_b = self.probe_transaction_command(create_b, cwd=self.data_dir)
+        self.assertNotEqual("deny", allowed_add["hookSpecificOutput"].get("permissionDecision"))
+        self.assertNotEqual("deny", allowed_commit["hookSpecificOutput"].get("permissionDecision"))
         self.assertNotEqual(
             "deny",
             allowed_create_a["hookSpecificOutput"].get("permissionDecision"),
@@ -6924,19 +6382,13 @@ class HookProtocolTests(unittest.TestCase):
             allowed_create_b["hookSpecificOutput"].get("permissionDecision"),
         )
 
-        cross_scope_commit = self.bash(
-            f'git -C {repo_a} commit -m "fix: other"', cwd=self.data_dir
-        )
-        cross_scope_add = self.bash(
-            f"git -C {repo_b} add README.md", cwd=self.data_dir
-        )
+        cross_scope_commit = self.bash(f'git -C {repo_a} commit -m "fix: other"', cwd=self.data_dir)
+        cross_scope_add = self.bash(f"git -C {repo_b} add README.md", cwd=self.data_dir)
         self.assertEqual(
             "deny",
             cross_scope_commit["hookSpecificOutput"]["permissionDecision"],
         )
-        self.assertEqual(
-            "deny", cross_scope_add["hookSpecificOutput"]["permissionDecision"]
-        )
+        self.assertEqual("deny", cross_scope_add["hookSpecificOutput"]["permissionDecision"])
 
     def test_prompt_github_mapping_does_not_require_gh_on_path(self) -> None:
         module = __import__("control_plane_hook")
@@ -6946,12 +6398,8 @@ class HookProtocolTests(unittest.TestCase):
         repo_b.mkdir()
         target_a = "sample-owner/prompt-without-gh-a"
         target_b = "sample-owner/prompt-without-gh-b"
-        create_a = (
-            f"gh repo create {target_a} --private --source '{repo_a}' --remote origin"
-        )
-        create_b = (
-            f"gh repo create {target_b} --private --source '{repo_b}' --remote origin"
-        )
+        create_a = f"gh repo create {target_a} --private --source '{repo_a}' --remote origin"
+        create_b = f"gh repo create {target_b} --private --source '{repo_b}' --remote origin"
         prompt = (
             "本轮明确授权执行以下 publication transaction：\n"
             f"`git -C '{repo_a}' add -- .`\n"
@@ -6985,15 +6433,10 @@ class HookProtocolTests(unittest.TestCase):
                     {"github_network", "github_repo_create"},
                 )
             )
-            grant = module._local_git_grant_from_prompt(
-                prompt, self.data_dir, "prompt-without-gh-turn", None
-            )
+            grant = module._local_git_grant_from_prompt(prompt, self.data_dir, "prompt-without-gh-turn", None)
 
         self.assertIsInstance(grant, dict)
-        mappings = {
-            binding["scope"]: binding["target"]
-            for binding in grant["bindings"].values()
-        }
+        mappings = {binding["scope"]: binding["target"] for binding in grant["bindings"].values()}
         self.assertEqual(
             {
                 module._normalized_cwd(str(repo_a)): target_a,
@@ -7108,6 +6551,406 @@ class HookProtocolTests(unittest.TestCase):
         for command in ["sed -n '1,20p' file.txt", "nl -ba file.txt"]:
             with self.subTest(command=command):
                 self.assertTrue(module._is_strictly_read_only_command(command))
+
+    def seed_remote_repository(self, name: str) -> Path:
+        repo = Path(self.data_dir) / name
+        repo.mkdir()
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main", str(repo)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "remote",
+                "add",
+                "origin",
+                f"https://github.com/fixture-owner/{name}.git",
+            ],
+            check=True,
+        )
+        return repo
+
+    def push_authorization_event(self, repositories: list[Path]) -> dict:
+        commands = "\n".join(f"`git -C {repo} push origin main`" for repo in repositories)
+        return {
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": self.session,
+            "turn_id": self.turn,
+            "cwd": self.data_dir,
+            "prompt": f"本轮批准你依次执行以下字面命令：\n{commands}\n推送 main。",
+        }
+
+    def test_high_value_redirection_targets_are_denied(self) -> None:
+        module = __import__("control_plane_hook")
+        commands = [
+            "echo value > /etc/hosts",
+            "echo value > /private/etc/hosts",
+            "echo value >> ~/.bashrc",
+            "echo value > ~/.ssh/authorized_keys",
+            'echo value > "$HOME/.gitconfig"',
+            'echo value > "${HOME}/.codex/config.toml"',
+            f'echo value >> "{LINUX_HOME_FIXTURE}/.gitconfig"',
+            f"echo value > {MACOS_HOME_FIXTURE}/.codex/config.toml",
+            "echo value > ~/.codex/AGENTS.md",
+            "echo value > ~/.codex/hooks.json",
+            "echo value > ~/.codex/rules/default.rules",
+            f'echo value > "{WINDOWS_HOME_WITH_SPACE_FIXTURE}\\.ssh\\authorized_keys"',
+            f"echo value >> {WINDOWS_HOME_FIXTURE}\\.gitconfig",
+            f'echo value > "{WINDOWS_HOME_WITH_SPACE_FIXTURE}\\.codex\\config.toml"',
+            f"echo value > {WINDOWS_HOME_FIXTURE}\\.codex\\rules\\default.rules",
+            f"echo value > {WINDOWS_SLASH_HOME_FIXTURE}/.codex/hooks.json",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                result = self.bash(command)
+                output = result["hookSpecificOutput"]
+                self.assertEqual("deny", output["permissionDecision"])
+                self.assertIn("profile_persistence", output["permissionDecisionReason"])
+
+        windows_expanded_home_commands = [
+            r"echo value > %USERPROFILE%\.gitconfig",
+            r'echo value > "$env:USERPROFILE\.codex\hooks.json"',
+        ]
+        with mock.patch.object(module, "_looks_like_windows_command", return_value=True):
+            for command in windows_expanded_home_commands:
+                with self.subTest(windows_expanded_home_command=command):
+                    codes = {finding["code"] for finding in module._structured_command_findings(command)}
+                    self.assertIn("profile_persistence", codes)
+
+        custom_home_cases = [
+            ("/srv/example", "/srv/example/.gitconfig"),
+            (r"D:\Profiles\example", r"d:\profiles\EXAMPLE\.codex\config.toml"),
+        ]
+        for expanded_home, target in custom_home_cases:
+            with self.subTest(expanded_home=expanded_home, target=target):
+                with mock.patch.object(module.os.path, "expanduser", return_value=expanded_home):
+                    self.assertTrue(module._is_profile_persistence_redirection_target(target))
+
+        with mock.patch.object(module.sys, "platform", "darwin"):
+            for target in ("/ETC/hosts", "/PRIVATE/ETC/hosts"):
+                with self.subTest(macos_system_target=target):
+                    self.assertTrue(module._is_profile_persistence_redirection_target(target))
+
+    def test_redirect_targets_are_canonicalized_without_blocking_read_only_mentions(
+        self,
+    ) -> None:
+        module = __import__("control_plane_hook")
+        commands = [
+            "echo value >| ~/.codex/cache/../config.toml",
+            f"echo value &> {MACOS_HOME_FIXTURE.lower()}/.CODEX/HOOKS.JSON",
+            f"echo value &>> {WINDOWS_HOME_FIXTURE}\\.codex\\rules\\sub\\..\\default.rules",
+            "echo value > /tmp/../etc/hosts",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                result = self.bash(command)
+                output = result["hookSpecificOutput"]
+                self.assertEqual("deny", output["permissionDecision"])
+                self.assertIn("profile_persistence", output["permissionDecisionReason"])
+
+        with mock.patch.object(module.os.path, "expanduser", return_value=MACOS_HOME_FIXTURE):
+            self.assertTrue(
+                module._is_profile_persistence_redirection_target(
+                    MACOS_HOME_FIXTURE.lower() + "/.CODEX/cache/../CONFIG.TOML"
+                )
+            )
+
+        for command in (
+            f"rg needle {MACOS_HOME_FIXTURE}/project/../.gitconfig",
+            f"printf '%s\\n' '{WINDOWS_HOME_FIXTURE}\\.codex\\config.toml'",
+        ):
+            with self.subTest(read_only=command):
+                self.assertEqual({}, self.bash(command))
+
+        self.prompt("Process Example Capital position data locally.")
+        read_only = self.bash(f"rg 'position: TEST_POSITION_049' {MACOS_HOME_FIXTURE}/.codex/config.toml")
+        self.assertNotEqual(
+            "deny",
+            read_only.get("hookSpecificOutput", {}).get("permissionDecision"),
+        )
+        redirected = self.bash("printf 'position: TEST_POSITION_050' >| ~/.codex/config.toml")
+        self.assertEqual("deny", redirected["hookSpecificOutput"]["permissionDecision"])
+        self.assertIn(
+            "profile_persistence",
+            redirected["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_similar_redirection_targets_do_not_add_denial_noise(self) -> None:
+        module = __import__("control_plane_hook")
+        commands = [
+            "echo value > /tmp/authorized_keys",
+            f"echo value > {LINUX_HOME_FIXTURE}/.ssh/authorized_keys.backup",
+            "echo value > /workspace/.gitconfig",
+            f"echo value > {LINUX_HOME_FIXTURE}/project/.gitconfig",
+            "echo value > /workspace/.codex/config.toml",
+            f"echo value > {LINUX_HOME_FIXTURE}/.codex/config.toml.backup",
+            f"echo value > {LINUX_HOME_FIXTURE}/.codex/cache/config.toml",
+            f"echo value > {LINUX_HOME_FIXTURE}/.codex/rules/README.md",
+            r"echo value > C:\work\.gitconfig",
+            f"echo value > {WINDOWS_HOME_FIXTURE}\\.codex\\logs\\config.toml",
+            "echo value > C:/work/.codex/hooks.json",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                codes = {finding["code"] for finding in module._structured_command_findings(command)}
+                self.assertNotIn("profile_persistence", codes)
+                self.assertEqual({}, self.bash(command))
+
+        expanded_home_lookalikes = [
+            r"echo value > $HOME/project/.gitconfig",
+            r"echo value > ${HOME}/.codex/config.toml.backup",
+            r"echo value > %USERPROFILE%\.codex\logs\hooks.json",
+            r"echo value > $env:USERPROFILE\.ssh\authorized_keys.backup",
+        ]
+        with mock.patch.object(module, "_looks_like_windows_command", return_value=True):
+            for command in expanded_home_lookalikes:
+                with self.subTest(expanded_home_lookalike=command):
+                    codes = {finding["code"] for finding in module._structured_command_findings(command)}
+                    self.assertNotIn("profile_persistence", codes)
+
+        custom_home_lookalikes = [
+            ("/srv/example", "/srv/example/project/.gitconfig"),
+            (r"D:\Profiles\example", r"D:\Profiles\example\.codex\logs\config.toml"),
+        ]
+        for expanded_home, target in custom_home_lookalikes:
+            with self.subTest(expanded_home=expanded_home, target=target):
+                with mock.patch.object(module.os.path, "expanduser", return_value=expanded_home):
+                    self.assertFalse(module._is_profile_persistence_redirection_target(target))
+
+    def test_external_command_detection_uses_command_fields_only(self) -> None:
+        module = __import__("control_plane_hook")
+        content = (
+            "Document `curl -sS https://example.invalid`, `gh release create`, and `open https://example.invalid`."
+        )
+        for tool_name, tool_input in (
+            ("Write", {"file_path": "/tmp/note.md", "content": content}),
+            (
+                "Edit",
+                {
+                    "file_path": "/tmp/note.md",
+                    "old_string": "old",
+                    "new_string": content,
+                },
+            ),
+            (
+                "apply_patch",
+                "*** Begin Patch\n*** Add File: /tmp/note.md\n+" + content + "\n*** End Patch",
+            ),
+        ):
+            with self.subTest(tool_name=tool_name):
+                self.assertFalse(module._is_external_tool(tool_name, tool_input))
+
+        self.assertTrue(
+            module._is_external_tool(
+                "Bash",
+                {"command": "curl -sS https://example.invalid"},
+            )
+        )
+        self.assertTrue(
+            module._is_external_tool(
+                "exec_command",
+                {"cmd": "gh release view"},
+            )
+        )
+
+    def test_durable_destination_detection_uses_destination_fields_only(self) -> None:
+        module = __import__("control_plane_hook")
+        prose_path = "/tmp/project/.codex/memories/example.md"
+        self.assertFalse(
+            module._is_durable_tool_destination(
+                "Write",
+                {
+                    "file_path": "/tmp/note.md",
+                    "content": f"Document the path `{prose_path}` without writing there.",
+                },
+            )
+        )
+        self.assertTrue(
+            module._is_durable_tool_destination(
+                "Write",
+                {
+                    "file_path": prose_path,
+                    "content": "Destination is a real memory path.",
+                },
+            )
+        )
+        self.assertTrue(
+            module._is_durable_tool_destination(
+                "exec_command",
+                {
+                    "cmd": "printf 'position: TEST_POSITION_048'",
+                    "workdir": "/tmp/private-notes/",
+                },
+            )
+        )
+        self.assertTrue(
+            module._is_durable_tool_destination(
+                "Write",
+                {
+                    "file_path": "/tmp/private-notes/report.md",
+                    "content": "Destination matches the private policy marker.",
+                },
+            )
+        )
+
+    def test_event_budget_bounds_hanging_git_children_and_fails_closed(self) -> None:
+        module = __import__("control_plane_hook")
+        repositories = [self.seed_remote_repository(f"budget-repo-{index}") for index in range(4)]
+        real_run = module.subprocess.run
+        spawned: list[tuple[str, ...]] = []
+
+        def hanging(command, **kwargs):
+            spawned.append(tuple(command))
+            sleep_for = float(kwargs.get("timeout") or 1.0) + 5.0
+            return real_run(
+                [sys.executable, "-c", f"import time; time.sleep({sleep_for})"],
+                **kwargs,
+            )
+
+        event = self.push_authorization_event(repositories)
+        with (
+            mock.patch.object(module, "_EVENT_BUDGET_SECONDS", 1.0),
+            mock.patch.object(module.subprocess, "run", side_effect=hanging),
+        ):
+            started = time.monotonic()
+            module.dispatch(event)
+            elapsed = time.monotonic() - started
+
+        # Unbounded per-child timeouts would have taken far longer than the
+        # host's ten-second hook timeout, which is a fail-open path.
+        self.assertTrue(spawned)
+        self.assertLess(elapsed, 4.0)
+        self.assertLess(len(spawned), 4 * len(repositories))
+        state = json.loads(module.state_store._state_path(self.session).read_text(encoding="utf-8"))
+        self.assertIsNone(state["local_git_grant"])
+
+    def test_git_classification_reads_are_memoized_within_one_event(self) -> None:
+        module = __import__("control_plane_hook")
+        repo = self.seed_remote_repository("memoized-remote")
+        self.seed_git_branch(repo)
+        real_run = module.subprocess.run
+        observed: list[tuple[tuple[str, ...], str | None]] = []
+
+        def counting(command, **kwargs):
+            observed.append((tuple(command), kwargs.get("cwd")))
+            return real_run(command, **kwargs)
+
+        with mock.patch.object(module.subprocess, "run", side_effect=counting):
+            module.dispatch(self.push_authorization_event([repo]))
+
+        self.assertTrue(observed)
+        self.assertEqual(len(observed), len(set(observed)))
+
+    def test_memoized_reads_do_not_leak_across_events(self) -> None:
+        module = __import__("control_plane_hook")
+        repo = self.seed_remote_repository("recheck-remote")
+        self.seed_git_branch(repo)
+        event = self.push_authorization_event([repo])
+        module.dispatch(event)
+        real_run = module.subprocess.run
+        observed: list[tuple[str, ...]] = []
+
+        def counting(command, **kwargs):
+            observed.append(tuple(command))
+            return real_run(command, **kwargs)
+
+        with mock.patch.object(module.subprocess, "run", side_effect=counting):
+            module.dispatch(event)
+
+        self.assertTrue(
+            any("get-url" in command for command in observed),
+            msg="a later event must re-read the remote instead of reusing a cache",
+        )
+
+    def test_event_budget_globals_clear_after_success_and_exception(self) -> None:
+        module = __import__("control_plane_hook")
+
+        def successful_handler(_event: dict[str, object]) -> dict[str, object]:
+            self.assertIsNotNone(module._EVENT_DEADLINE)
+            module._GIT_QUERY_CACHE[("fixture",)] = "cached"
+            return {}
+
+        with mock.patch.object(module, "_handle_tool_gate", side_effect=successful_handler):
+            self.assertEqual({}, module.dispatch({"hook_event_name": "PreToolUse"}))
+        self.assertIsNone(module._EVENT_DEADLINE)
+        self.assertEqual({}, module._GIT_QUERY_CACHE)
+
+        def failing_handler(_event: dict[str, object]) -> dict[str, object]:
+            self.assertIsNotNone(module._EVENT_DEADLINE)
+            module._GIT_QUERY_CACHE[("fixture",)] = "cached"
+            raise RuntimeError("simulated failure")
+
+        with mock.patch.object(module, "_handle_tool_gate", side_effect=failing_handler):
+            with self.assertRaises(RuntimeError):
+                module.dispatch({"hook_event_name": "PreToolUse"})
+        self.assertIsNone(module._EVENT_DEADLINE)
+        self.assertEqual({}, module._GIT_QUERY_CACHE)
+
+    def test_dispatch_snapshots_policy_and_data_directory_per_event(self) -> None:
+        module = __import__("control_plane_hook")
+        first_policy_path = Path(self.data_dir) / "policy.json"
+        observations: list[object] = []
+        with tempfile.TemporaryDirectory() as second_data_dir:
+            second_policy_path = Path(second_data_dir) / "policy.json"
+            second_policy_path.write_text(
+                json.dumps({"sensitive_markers": ["Second Capital"]}),
+                encoding="utf-8",
+            )
+
+            def first_handler(_event: dict[str, object]) -> dict[str, object]:
+                first_data = module._data_dir()
+                first_policy = module._policy()
+                first_policy_path.write_text(
+                    json.dumps({"sensitive_markers": ["Changed Capital"]}),
+                    encoding="utf-8",
+                )
+                os.environ["PLUGIN_DATA"] = second_data_dir
+                observations.extend(
+                    [
+                        first_data,
+                        module._data_dir(),
+                        first_policy,
+                        module._policy(),
+                    ]
+                )
+                return {}
+
+            def second_handler(_event: dict[str, object]) -> dict[str, object]:
+                observations.extend([module._data_dir(), module._policy()])
+                return {}
+
+            with (
+                mock.patch.dict(os.environ, {"PLUGIN_DATA": self.data_dir}, clear=False),
+                mock.patch.object(module, "_private_directory", wraps=module._private_directory) as private_directory,
+                mock.patch.object(module.json, "loads", wraps=module.json.loads) as json_loads,
+            ):
+                with mock.patch.object(module, "_handle_tool_gate", side_effect=first_handler):
+                    self.assertEqual({}, module.dispatch({"hook_event_name": "PreToolUse"}))
+                with mock.patch.object(module, "_handle_tool_gate", side_effect=second_handler):
+                    self.assertEqual({}, module.dispatch({"hook_event_name": "PreToolUse"}))
+
+        self.assertEqual(Path(self.data_dir), observations[0])
+        self.assertEqual(observations[0], observations[1])
+        self.assertIs(observations[2], observations[3])
+        self.assertEqual(["Example Capital"], observations[2]["markers"])
+        self.assertEqual(Path(second_data_dir), observations[4])
+        self.assertEqual(["Second Capital"], observations[5]["markers"])
+        self.assertEqual(2, private_directory.call_count)
+        self.assertEqual(2, json_loads.call_count)
+        self.assertFalse(module._EVENT_SNAPSHOT_ACTIVE)
+        self.assertIsNone(module._EVENT_DATA_DIR)
+        self.assertIsNone(module._EVENT_POLICY)
+        with mock.patch.object(module, "_handle_tool_gate", side_effect=RuntimeError("simulated failure")):
+            with self.assertRaises(RuntimeError):
+                module.dispatch({"hook_event_name": "PreToolUse"})
+        self.assertFalse(module._EVENT_SNAPSHOT_ACTIVE)
+        self.assertIsNone(module._EVENT_DATA_DIR)
+        self.assertIsNone(module._EVENT_POLICY)
 
 
 if __name__ == "__main__":
