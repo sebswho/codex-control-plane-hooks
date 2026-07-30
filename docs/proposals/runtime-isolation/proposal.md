@@ -2,14 +2,14 @@
 
 状态：已批准（2026-07-24）
 Git 分支基线：实施时从 fork 的最新 `main` 新建分支；本次规格修订基于 `0ffc0e3732599bbd668e150070495264e2b0f913`
-行为回归基线：`5851980271ae4a395ead54456f616d19fa921a51`（v0.2.6 对应提交）
+行为回归基线：上游 v0.2.8 `b6f86a49d8f2adca146d8eb99d0847b465e543d6` + 本地 parity merge `3b5fa54598a80d1fbed6683ff3d48b71e0146cb5`
 实施分支：批准后从当时最新 `main` 新建 `feature/windows-app-runtime`
 依赖：无
 后续：`../event-entrypoints/proposal.md`
 
 ## 动机
 
-当前 Windows Hook 每次触发都会从 `PATH` 中定位并探测 `py.exe`、`python.exe`。即使 v0.2.6 已限制为显式 `PATH`、共享五秒截止时间并清理超时进程树，这条路径仍有三个问题：
+当前 Windows Hook 每次触发都会从 `PATH` 中定位并探测 `py.exe`、`python.exe`。在同步上游 v0.2.8 基线前，这条路径即使已限制为显式 `PATH`、共享截止时间并清理超时进程树，这条路径仍有三个问题：
 
 1. 每次 Hook 都支付解释器发现和版本探测成本。
 2. Codex App 实际执行的 Python 会随用户 `PATH`、Python Launcher 和安装状态变化。

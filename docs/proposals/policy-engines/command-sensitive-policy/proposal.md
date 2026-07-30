@@ -2,7 +2,7 @@
 
 状态：待批准
 实施分支：从最新 `main` 创建 `feature/command-sensitive-policy`
-行为基线：v0.2.6
+行为基线：上游 v0.2.8 `b6f86a49d8f2adca146d8eb99d0847b465e543d6` + 本地 parity merge `3b5fa54598a80d1fbed6683ff3d48b71e0146cb5`
 依赖：`../../core-extraction/user-prompt-entrypoint/proposal.md`
 
 ## 动机与目标
