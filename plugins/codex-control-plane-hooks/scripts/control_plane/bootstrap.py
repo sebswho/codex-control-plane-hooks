@@ -38,7 +38,10 @@ def _require_regular_file(path: Path, description: str) -> None:
         raise BootstrapError(f"Invalid {description}.")
 
 
-def _validated_scripts_root(entrypoint_file: str) -> Path:
+def _validated_scripts_root(
+    entrypoint_file: str,
+    required_package_files: tuple[tuple[str, str], ...],
+) -> Path:
     entrypoint = Path(entrypoint_file)
     if not entrypoint.is_absolute():
         raise BootstrapError("Entrypoint path must be absolute.")
@@ -58,13 +61,24 @@ def _validated_scripts_root(entrypoint_file: str) -> Path:
     _require_directory(scripts_root, "scripts root")
     _require_directory(package_dir, "control_plane package")
     _require_directory(entrypoints_dir, "entrypoints package")
+    handlers_dir = package_dir / "handlers"
+    _require_directory(handlers_dir, "handlers package")
     _require_regular_file(package_dir / "__init__.py", "control_plane package marker")
     _require_regular_file(package_dir / "policy.py", "policy module")
     _require_regular_file(package_dir / "protocol.py", "protocol module")
     _require_regular_file(package_dir / "state.py", "state module")
+    _require_regular_file(package_dir / "core.py", "core module")
     _require_regular_file(
         entrypoints_dir / "__init__.py", "entrypoints package marker"
     )
+    _require_regular_file(
+        handlers_dir / "__init__.py", "handlers package marker"
+    )
+    for relative_name, description in required_package_files:
+        relative_path = Path(relative_name)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise BootstrapError("Required package file is outside the package.")
+        _require_regular_file(package_dir / relative_path, description)
     _require_regular_file(entrypoint, "entrypoint")
 
     scripts_root_text = str(scripts_root)
@@ -73,11 +87,15 @@ def _validated_scripts_root(entrypoint_file: str) -> Path:
     return scripts_root
 
 
-def configure_package(entrypoint_file: str) -> Path:
+def configure_package(
+    entrypoint_file: str,
+    *,
+    required_package_files: tuple[tuple[str, str], ...] = (),
+) -> Path:
     """Validate the package layout or terminate with the bootstrap exit contract."""
 
     try:
-        return _validated_scripts_root(entrypoint_file)
+        return _validated_scripts_root(entrypoint_file, required_package_files)
     except BootstrapError:
         sys.stderr.write("codex-control-plane-hooks: package bootstrap failed\n")
         raise SystemExit(126) from None

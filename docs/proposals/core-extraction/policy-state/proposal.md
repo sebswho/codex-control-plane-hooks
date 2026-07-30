@@ -1,6 +1,6 @@
 # Policy 与 state 基础 Interface
 
-状态：已批准并实施（2026-07-29，待 PR/CI）
+状态：已完成（2026-07-30，PR #5 已合并）
 实施分支：从当时最新 `main` 创建 `feature/core-policy-state`
 行为基线：v0.2.6
 依赖：`../bootstrap-protocol/proposal.md`
