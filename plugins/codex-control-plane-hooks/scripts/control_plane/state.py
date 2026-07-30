@@ -240,6 +240,27 @@ def _unlock_state(stream, backend: str) -> None:
     raise RuntimeError(f"unknown state-lock backend: {backend}")
 
 
+def _try_lock_state(stream) -> str | None:
+    """Try one state-style lock without waiting; None leaves ownership unknown."""
+    if fcntl is not None:
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return "fcntl"
+        except (BlockingIOError, OSError):
+            return None
+    if msvcrt is None:
+        return None
+    stream.seek(0, os.SEEK_END)
+    if stream.tell() == 0:
+        return None
+    stream.seek(0)
+    try:
+        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+        return "msvcrt"
+    except OSError:
+        return None
+
+
 def _write_atomic(path: Path, state: _SessionSnapshot) -> None:
     temp = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     try:

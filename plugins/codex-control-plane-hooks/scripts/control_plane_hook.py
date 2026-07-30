@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import importlib
+import itertools
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 from collections.abc import Sequence
@@ -329,7 +331,15 @@ _DURABLE_DESTINATION_FIELDS = {
     "workspace",
 }
 _GIT_RUNNER_TTL_SECONDS = 5 * 60
+_ORPHAN_CLEANUP_RECORD_LIMIT = 64
+_ORPHAN_CLEANUP_DIRECTORY_SCAN_LIMIT = 64
+_ORPHAN_CLEANUP_DIRECTORY_LIMIT = 2
+_ORPHAN_CLEANUP_BUDGET_SECONDS = 1.0
+_ORPHAN_CLEANUP_ENTRY_TIMEOUT_SECONDS = 0.5
+_ORPHAN_CLEANUP_LOCK_NAME = ".orphan-cleanup.lock"
 _GIT_RUNNER_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+_GIT_RUNNER_LEASE_PREFIX = ".git-runner-lease-"
+_GIT_PUSH_DIR_PREFIX = ".git-push-"
 _EMPTY_GIT_URL_REWRITE_SNAPSHOT = hashlib.sha256(b"[]").hexdigest()
 _SCOPED_PUSH_UPSTREAM_OPTIONS = frozenset({"-u", "--set-upstream"})
 _TRUSTED_EXEC_COMMAND_SHELLS = {"/bin/bash", "/bin/sh", "/bin/zsh"}
@@ -682,6 +692,24 @@ def _open_private(path: Path, flags: int, mode: int = 0o600):
     return os.fdopen(descriptor, stream_mode, encoding="utf-8")
 
 
+def _lock_state(stream) -> str:
+    if os.name == "nt":
+        stream.seek(0, os.SEEK_END)
+        if stream.tell() == 0:
+            stream.write("0")
+            stream.flush()
+            os.fsync(stream.fileno())
+    return state_store._lock_state(stream)
+
+
+def _unlock_state(stream, backend: str) -> None:
+    state_store._unlock_state(stream, backend)
+
+
+def _try_lock_state(stream) -> str | None:
+    return state_store._try_lock_state(stream)
+
+
 def _unlink_owned_regular(candidate: Path) -> None:
     try:
         info = os.stat(candidate, follow_symlinks=False)
@@ -696,6 +724,12 @@ def _git_runner_path(kind: str, token: str) -> Path:
     if kind not in {"request", "running", "status"} or not _GIT_RUNNER_TOKEN_RE.fullmatch(token):
         raise ValueError("invalid Git runner path")
     return _data_dir() / f".git-runner-{kind}-{token}.json"
+
+
+def _git_runner_lease_path(runner_id: str) -> Path:
+    if not _GIT_RUNNER_TOKEN_RE.fullmatch(runner_id):
+        raise ValueError("invalid Git runner lease path")
+    return _data_dir() / f"{_GIT_RUNNER_LEASE_PREFIX}{runner_id}.lock"
 
 
 def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
@@ -723,16 +757,305 @@ def _read_private_json(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _cleanup_stale_git_runner_records() -> None:
+def _git_runner_lease_is_active(runner_id: str) -> bool:
+    try:
+        with _open_private(_git_runner_lease_path(runner_id), os.O_RDWR) as stream:
+            backend = _try_lock_state(stream)
+            if backend is None:
+                return True
+            try:
+                return False
+            finally:
+                _unlock_state(stream, backend)
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return True
+
+def _git_runner_record_id(path: Path, kind: str) -> str:
+    prefix = f".git-runner-{kind}-"
+    name = path.name
+    if not name.startswith(prefix) or not name.endswith(".json"):
+        return ""
+    runner_id = name[len(prefix) : -len(".json")]
+    return runner_id if _GIT_RUNNER_TOKEN_RE.fullmatch(runner_id) else ""
+
+def _orphan_cleanup_budget_exhausted(
+    candidates_seen: int,
+    *,
+    deadline: float | None,
+    candidate_limit: int | None,
+) -> bool:
+    return bool(
+        (candidate_limit is not None and candidates_seen >= candidate_limit)
+        or (deadline is not None and time.monotonic() >= deadline)
+    )
+
+def _cleanup_stale_git_runner_records(
+    *,
+    deadline: float | None = None,
+    record_limit: int | None = None,
+    directory_limit: int | None = None,
+    directory_cursor: int = 0,
+) -> int:
+    if deadline is None:
+        deadline = time.monotonic() + _ORPHAN_CLEANUP_BUDGET_SECONDS
+    if record_limit is None:
+        record_limit = _ORPHAN_CLEANUP_RECORD_LIMIT
+    if directory_limit is None:
+        directory_limit = _ORPHAN_CLEANUP_DIRECTORY_LIMIT
     cutoff = time.time() - _GIT_RUNNER_TTL_SECONDS
-    for pattern in (".git-runner-request-*.json", ".git-runner-running-*.json", ".git-runner-status-*.json"):
-        for candidate in _data_dir().glob(pattern):
+    next_directory_cursor = _cleanup_stale_git_push_directories(
+        cutoff,
+        deadline=deadline,
+        scan_limit=_ORPHAN_CLEANUP_DIRECTORY_SCAN_LIMIT,
+        cleanup_limit=directory_limit,
+        cursor=directory_cursor,
+    )
+    records_seen = 0
+    for kind in ("request", "status", "running"):
+        if _orphan_cleanup_budget_exhausted(
+            records_seen,
+            deadline=deadline,
+            candidate_limit=record_limit,
+        ):
+            break
+        for candidate in _data_dir().glob(f".git-runner-{kind}-*.json"):
+            if _orphan_cleanup_budget_exhausted(
+                records_seen,
+                deadline=deadline,
+                candidate_limit=record_limit,
+            ):
+                break
+            records_seen += 1
             try:
                 info = os.stat(candidate, follow_symlinks=False)
             except FileNotFoundError:
                 continue
-            if info.st_mtime < cutoff:
-                _unlink_owned_regular(candidate)
+            if info.st_mtime >= cutoff:
+                continue
+            runner_id = _git_runner_record_id(candidate, kind)
+            if runner_id and _git_runner_lease_is_active(runner_id):
+                continue
+            _unlink_owned_regular(candidate)
+    return next_directory_cursor
+
+def _git_push_directory_token(name: str) -> str:
+    token = name[len(_GIT_PUSH_DIR_PREFIX) :].split("-", 1)[0]
+    return token if _GIT_RUNNER_TOKEN_RE.fullmatch(token) else ""
+
+def _remove_tree_with_deadline(candidate: Path, deadline: float | None) -> bool:
+    if deadline is None:
+        deadline = time.monotonic() + _ORPHAN_CLEANUP_BUDGET_SECONDS
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return False
+    timeout = min(remaining, _ORPHAN_CLEANUP_ENTRY_TIMEOUT_SECONDS)
+    script = (
+        "import shutil,sys\n"
+        "try:\n"
+        "    shutil.rmtree(sys.argv[1])\n"
+        "except FileNotFoundError:\n"
+        "    pass\n"
+    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", script, str(candidate)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0 and not candidate.exists()
+
+def _cleanup_stale_git_push_directories(
+    cutoff: float,
+    *,
+    deadline: float | None = None,
+    scan_limit: int | None = None,
+    cleanup_limit: int | None = None,
+    cursor: int = 0,
+) -> int:
+    """A killed runner cannot unlink its own isolated push repository.
+
+    That repository holds a frozen credential and HTTP config snapshot, so it
+    must not outlive the runner that created it. The runner holds a token lease
+    before the directory exists and until its Git child has exited.
+    """
+    cursor = max(0, cursor)
+    pattern = f"{_GIT_PUSH_DIR_PREFIX}*"
+    if scan_limit is None:
+        all_candidates = list(_data_dir().glob(pattern))
+        if not all_candidates:
+            return 0
+        cursor %= len(all_candidates)
+        rotated = all_candidates[cursor:] + all_candidates[:cursor]
+        candidates = [
+            (candidate, (cursor + offset + 1) % len(all_candidates))
+            for offset, candidate in enumerate(rotated)
+        ]
+    else:
+        if scan_limit <= 0:
+            return cursor
+        tail = list(
+            itertools.islice(
+                _data_dir().glob(pattern),
+                cursor,
+                cursor + scan_limit,
+            )
+        )
+        candidates = [
+            (candidate, cursor + offset + 1)
+            for offset, candidate in enumerate(tail)
+        ]
+        if len(candidates) < scan_limit:
+            seen = {candidate for candidate, _next_cursor in candidates}
+            for index, candidate in enumerate(_data_dir().glob(pattern)):
+                if candidate in seen:
+                    continue
+                candidates.append((candidate, index + 1))
+                if len(candidates) >= scan_limit:
+                    break
+    if not candidates:
+        return 0
+    candidates_seen = 0
+    cleanup_attempts = 0
+    next_cursor = cursor
+    for candidate, candidate_next_cursor in candidates:
+        if _orphan_cleanup_budget_exhausted(
+            candidates_seen,
+            deadline=deadline,
+            candidate_limit=scan_limit,
+        ) or (cleanup_limit is not None and cleanup_attempts >= cleanup_limit):
+            break
+        candidates_seen += 1
+        next_cursor = candidate_next_cursor
+        try:
+            info = os.stat(candidate, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        owned = os.name == "nt" or not hasattr(os, "getuid") or info.st_uid == os.getuid()
+        if not owned or _is_reparse_info(info) or not stat.S_ISDIR(info.st_mode):
+            continue
+        candidate_token = _git_push_directory_token(candidate.name)
+        if candidate_token and _git_runner_lease_is_active(candidate_token):
+            continue
+        if info.st_mtime < cutoff:
+            cleanup_attempts += 1
+            _remove_tree_with_deadline(candidate, deadline)
+    return next_cursor
+
+def _configured_data_dir_argument() -> str:
+    if _EVENT_SNAPSHOT_ACTIVE and _EVENT_DATA_DIR is not None:
+        return str(_EVENT_DATA_DIR)
+    configured = os.environ.get("PLUGIN_DATA")
+    if configured:
+        return str(_absolute_configured_path(configured, "PLUGIN_DATA"))
+    if os.name == "nt":
+        raise RuntimeError("PLUGIN_DATA is required on Windows")
+    state_home = os.environ.get("XDG_STATE_HOME")
+    base = (
+        _absolute_configured_path(state_home, "XDG_STATE_HOME")
+        if state_home
+        else Path.home() / ".local" / "state"
+    )
+    return str(base / "codex-control-plane-hooks")
+
+def _orphan_cleanup_lock_path(data_dir: Path) -> Path:
+    identity = str(os.getuid()) if hasattr(os, "getuid") else "windows"
+    lock_root = _private_directory(
+        Path(tempfile.gettempdir()) / f"codex-control-plane-cleanup-{identity}"
+    )
+    normalized = os.path.normcase(os.path.abspath(str(data_dir)))
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:32]
+    return lock_root / f"{digest}-{_ORPHAN_CLEANUP_LOCK_NAME}"
+
+def _read_orphan_cleanup_cursor(lock_stream) -> int:
+    lock_stream.seek(0)
+    raw = lock_stream.read(64).strip()
+    return int(raw) if raw.isdecimal() else 0
+
+def _write_orphan_cleanup_cursor(lock_stream, cursor: int) -> None:
+    lock_stream.seek(0)
+    lock_stream.truncate()
+    lock_stream.write(str(max(0, cursor)))
+    lock_stream.flush()
+    os.fsync(lock_stream.fileno())
+
+def _run_orphan_cleanup_worker(data_dir_value: str) -> int:
+    lock_backend = ""
+    try:
+        data_dir = _absolute_configured_path(
+            data_dir_value,
+            "cleanup data directory",
+        )
+        with _open_private(
+            _orphan_cleanup_lock_path(data_dir),
+            os.O_RDWR | os.O_CREAT,
+        ) as lock_stream:
+            if os.name == "nt":
+                lock_stream.seek(0, os.SEEK_END)
+                if lock_stream.tell() == 0:
+                    lock_stream.write("0")
+                    lock_stream.flush()
+                    os.fsync(lock_stream.fileno())
+            lock_backend = _try_lock_state(lock_stream) or ""
+            if not lock_backend:
+                return 0
+            try:
+                _configure_runner_data_dir(str(data_dir))
+                cursor = _read_orphan_cleanup_cursor(lock_stream)
+                next_cursor = _cleanup_stale_git_runner_records(
+                    directory_cursor=cursor,
+                )
+                _write_orphan_cleanup_cursor(lock_stream, next_cursor)
+            finally:
+                _unlock_state(lock_stream, lock_backend)
+    except Exception:
+        return 0
+    return 0
+
+def _reap_orphan_cleanup_process(process: subprocess.Popen[Any]) -> None:
+    try:
+        process.wait()
+    except Exception:
+        pass
+
+def _schedule_orphan_cleanup() -> None:
+    """Start one detached best-effort worker without delaying Hook output."""
+    try:
+        command = [
+            sys.executable,
+            "-I",
+            "-S",
+            str(Path(__file__).resolve()),
+            "--cleanup-orphans",
+            _configured_data_dir_argument(),
+        ]
+        options: dict[str, Any] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            options["creationflags"] = (
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "DETACHED_PROCESS", 0)
+            )
+        else:
+            options["start_new_session"] = True
+        process = subprocess.Popen(command, **options)
+        threading.Thread(
+            target=_reap_orphan_cleanup_process,
+            args=(process,),
+            daemon=True,
+        ).start()
+    except Exception:
+        pass
 
 
 def _powershell_quote(value: str) -> str:
@@ -897,7 +1220,6 @@ def _prepare_git_runner(
     original_digest: str,
     effective_cwd: str,
 ) -> str:
-    _cleanup_stale_git_runner_records()
     state = state_store.read_session(session_id)
     pending = state.get("pending_permission_authorizations")
     permission = pending.get(tool_use_id) if isinstance(pending, dict) else None
@@ -1388,9 +1710,13 @@ def _write_isolated_git_config(
 
 
 def _prepare_isolated_git_push(
-    object_dir: Path, object_format: str, environment: dict[str, str]
+    object_dir: Path, object_format: str, environment: dict[str, str], token: str
 ) -> tuple[Path, dict[str, str]]:
-    git_dir = Path(tempfile.mkdtemp(prefix=".git-push-", dir=str(_data_dir())))
+    if not _GIT_RUNNER_TOKEN_RE.fullmatch(token):
+        raise RuntimeError("Git runner token is invalid")
+    git_dir = Path(
+        tempfile.mkdtemp(prefix=f"{_GIT_PUSH_DIR_PREFIX}{token}-", dir=str(_data_dir()))
+    )
     try:
         config_records = _git_isolated_config_records(environment)
         empty_template = git_dir / "empty-template"
@@ -1550,10 +1876,36 @@ def _claim_git_runner_request(
     state_store.mutate_session(session_id, claim)
 
 
-def _run_approved_git(token: str) -> int:
+def _run_approved_git(runner_id: str) -> int:
+    if not _GIT_RUNNER_TOKEN_RE.fullmatch(runner_id):
+        return 126
+    lease_path = _git_runner_lease_path(runner_id)
+    lease_stream = None
+    lease_backend = ""
+    try:
+        lease_stream = _open_private(
+            lease_path, os.O_RDWR | os.O_CREAT | os.O_EXCL
+        )
+        lease_backend = _lock_state(lease_stream)
+    except Exception:
+        if lease_stream is not None:
+            lease_stream.close()
+            _unlink_owned_regular(lease_path)
+        return 126
+    try:
+        return _run_approved_git_with_lease(runner_id)
+    finally:
+        try:
+            _unlock_state(lease_stream, lease_backend)
+        finally:
+            lease_stream.close()
+            _unlink_owned_regular(lease_path)
+
+
+def _run_approved_git_with_lease(token: str) -> int:
     if not _GIT_RUNNER_TOKEN_RE.fullmatch(token):
         return 126
-    _cleanup_stale_git_runner_records()
+    _schedule_orphan_cleanup()
     request_path = _git_runner_path("request", token)
     running_path = _git_runner_path("running", token)
     status_path = _git_runner_path("status", token)
@@ -1604,7 +1956,9 @@ def _run_approved_git(token: str) -> int:
                 "oid": source_oid,
             }:
                 raise RuntimeError("Git runner push source changed after ticket binding")
-            isolated_git_dir, child_environment = _prepare_isolated_git_push(object_dir, object_format, environment)
+            isolated_git_dir, child_environment = _prepare_isolated_git_push(
+                object_dir, object_format, environment, token
+            )
             child_argv, set_upstream = _pinned_git_push_argv(
                 argv,
                 request,
@@ -2832,7 +3186,11 @@ def _internal_error_response(event: dict[str, Any], *, parse_error: bool = False
 
 
 def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == "--cleanup-orphans":
+        _enter_runner_mode()
+        return _run_orphan_cleanup_worker(sys.argv[2])
     if len(sys.argv) == 4 and sys.argv[1] == "--run-approved-git":
+        _enter_runner_mode()
         try:
             _configure_runner_data_dir(sys.argv[3])
         except Exception:
