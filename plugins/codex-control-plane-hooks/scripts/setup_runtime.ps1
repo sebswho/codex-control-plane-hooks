@@ -266,16 +266,45 @@ function Lock-DirectoryChain {
         [System.Collections.Generic.List[System.IDisposable]] $Locks,
 
         [Parameter(Mandatory = $true)]
-        [string] $Description
+        [string] $Description,
+
+        [Parameter(Mandatory = $false)]
+        [string] $TrustedRoot
     )
 
     $directories = New-Object System.Collections.Generic.List[string]
     $current = [System.IO.Path]::GetFullPath($Path)
+    $trusted = $null
+    $trustedParent = $null
+    if (-not [String]::IsNullOrWhiteSpace($TrustedRoot)) {
+        $trusted = [System.IO.Path]::GetFullPath($TrustedRoot)
+        $trustedParentInfo = [System.IO.Directory]::GetParent($trusted)
+        if ($null -ne $trustedParentInfo) {
+            $trustedParent = $trustedParentInfo.FullName
+        }
+    }
     while ($null -ne $current) {
+        $parent = [System.IO.Directory]::GetParent($current)
+        $isTrustedRoot = (
+            $null -ne $trusted -and
+            $current.Equals($trusted, [StringComparison]::OrdinalIgnoreCase)
+        )
+        # Sandboxed launchers can expose a sibling OS-managed user profile.
+        # Never require delete-denying locks on a profile directory itself.
+        $isPeerProfileRoot = (
+            $null -ne $trustedParent -and
+            $null -ne $parent -and
+            $parent.FullName.Equals(
+                $trustedParent,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        )
+        if ($isTrustedRoot -or $isPeerProfileRoot) {
+            break
+        }
         if (Test-Path -LiteralPath $current -PathType Container) {
             $directories.Insert(0, $current)
         }
-        $parent = [System.IO.Directory]::GetParent($current)
         if ($null -eq $parent) {
             $current = $null
         }
@@ -861,6 +890,14 @@ function Remove-OldRuntimes {
 
 try {
     Initialize-NativeMethods
+    $userProfile = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::UserProfile
+    )
+    if ([String]::IsNullOrWhiteSpace($userProfile)) {
+        Stop-SafeFailure -Message "Windows user profile could not be resolved"
+    }
+    $userProfile = [System.IO.Path]::GetFullPath($userProfile)
+    Assert-NoReparsePoint -Path $userProfile -Description "Windows user profile"
     $python = Get-FullExistingPath `
         -Path $PythonPath `
         -Description "PythonPath" `
@@ -868,17 +905,12 @@ try {
     Lock-DirectoryChain `
         -Path ([System.IO.Directory]::GetParent($python).FullName) `
         -Locks $pathLocks `
-        -Description "PythonPath"
+        -Description "PythonPath" `
+        -TrustedRoot $userProfile
     Lock-FileAgainstReplacement `
         -Path $python `
         -Locks $pathLocks `
         -Description "PythonPath"
-    $userProfile = [Environment]::GetFolderPath(
-        [Environment+SpecialFolder]::UserProfile
-    )
-    if ([String]::IsNullOrWhiteSpace($userProfile)) {
-        Stop-SafeFailure -Message "Windows user profile could not be resolved"
-    }
     $pluginData = Get-PluginDataDirectory `
         -ExplicitPath $PluginDataPath `
         -ExplicitCodexHome $CodexHome `
@@ -886,7 +918,8 @@ try {
     Lock-DirectoryChain `
         -Path $pluginData `
         -Locks $pathLocks `
-        -Description "PluginDataPath"
+        -Description "PluginDataPath" `
+        -TrustedRoot $userProfile
     $manifestPath = Join-Path $pluginData "runtime.json"
     Assert-ManifestTargetSafe -PluginData $pluginData -ManifestPath $manifestPath
     Assert-NoReparsePoint -Path $python -Description "PythonPath"
@@ -899,7 +932,8 @@ try {
     Lock-DirectoryChain `
         -Path $versionsRoot `
         -Locks $pathLocks `
-        -Description "Runtime root"
+        -Description "Runtime root" `
+        -TrustedRoot $userProfile
 
     $runtimeId = Get-RuntimeId -Interpreter $python -Version $pythonVersion
     $versionDirectory = Join-Path $versionsRoot $runtimeId
@@ -916,7 +950,8 @@ try {
         Lock-DirectoryChain `
             -Path $versionDirectory `
             -Locks $pathLocks `
-            -Description "Runtime version"
+            -Description "Runtime version" `
+            -TrustedRoot $userProfile
         Lock-FileAgainstReplacement `
             -Path $runtimeInterpreter `
             -Locks $pathLocks `
@@ -948,7 +983,8 @@ try {
         Lock-DirectoryChain `
             -Path $versionDirectory `
             -Locks $pathLocks `
-            -Description "Runtime version"
+            -Description "Runtime version" `
+            -TrustedRoot $userProfile
         Lock-FileAgainstReplacement `
             -Path $runtimeInterpreter `
             -Locks $pathLocks `
