@@ -1,4 +1,4 @@
-# Façade 收缩与 Windows App 验收
+# Façade 收缩与 Windows App canary 复验
 
 状态：待批准
 实施分支：从最新 `main` 创建 `feature/legacy-contraction-app-validation`
@@ -7,12 +7,12 @@
 
 ## 动机与目标
 
-在 façade 已稳定路由到内部 Adapter 后，只收缩已被外部 contract 覆盖的内部业务，并完成 Windows 10 Codex Desktop 的 trust/cache 实测和发布文档；单一 façade 继续保留。
+本提案以 Phase 1.5 已在提取前建立 Windows Codex App 的 trust/cache 基线为前提。本阶段在 façade 稳定路由到内部 Adapter 后，只收缩已被外部 contract 覆盖的内部业务，并重放该 canary、补充发布证据；单一 façade 继续保留。
 
 ## 设计
 
 - 仅删除已有等价外部 contract 覆盖的 façade 内部业务；保留 façade fallback、runner compatibility 与 cleanup 私有参数。
-- 使用 plugin cachebuster helper 与本地 marketplace 重装，在新任务和 App 重启后验证实际加载版本。
+- 沿用 Issue #20 的 checklist、plugin cachebuster helper 与本地 marketplace 重装流程，在新任务和 App 重启后验证实际加载版本。
 - 记录 App、PowerShell、Python 版本和 trust/cache 结果，不提交个人路径或敏感配置。
 
 ## 改动清单
@@ -28,6 +28,6 @@
 
 - [ ] 先证明每段待删除逻辑已有 response/state/artifact contract 与 façade fallback 覆盖。
 - [ ] 完整自动化与 packaged smoke 通过后再收缩。
-- [ ] Windows 10 App Happy Path、拒绝路径、重启、trust/cache 留下脱敏证据。
+- [ ] 重放 Windows App Happy Path、拒绝路径、重启、重装/升级与 trust/cache 场景，并留下脱敏证据。
 
 Façade routing proposal 合并且本提案批准后方可实施；合并后 Ticket 11 完成。
