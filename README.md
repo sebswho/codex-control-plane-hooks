@@ -255,7 +255,7 @@ Runtime support and Codex-host compatibility are separate claims. Hook event nam
 - Native Windows relies on host-managed NTFS permissions. The Hook rejects observed symlinks and reparse points but does not independently audit every DACL ACE.
 - Desktop GUI trust prompts remain outside hosted-runner CI coverage.
 
-Read the [Hook contract](docs/hook-contract.md) and [Threat model](docs/threat-model.md) before enabling experimental grants.
+Read the authoritative [Hook contract](docs/hook-contract.md), the [Threat model](docs/threat-model.md), and the [test ownership map](tests/README.md) before enabling experimental grants or adding protocol regressions.
 
 ## Publishing sanitized configurations
 

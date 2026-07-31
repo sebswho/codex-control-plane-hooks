@@ -1,5 +1,7 @@
 # Hook Contract
 
+This document is the single source of truth for Hook event, response, state, approval, runner, and cleanup behavior. `README.md` and `docs/configuration.md` provide deployment summaries and link back here; test ownership is recorded in [`tests/README.md`](../tests/README.md).
+
 The audited upstream behavior baseline is recorded in [upstream-v0.2.8-parity.md](upstream-v0.2.8-parity.md).
 
 ## Events

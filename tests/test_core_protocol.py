@@ -6,8 +6,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from protocol_test_fixtures import HookProtocolTestCase
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "plugins" / "codex-control-plane-hooks" / "scripts"
@@ -505,6 +509,152 @@ raise SystemExit(run_hook("UserPromptSubmit", handler))
             completed.stderr.replace(b"\r\n", b"\n"),
         )
         self.assertFalse(marker.exists())
+
+
+class EventContextRegressionTests(HookProtocolTestCase):
+    def test_event_budget_bounds_hanging_git_children_and_fails_closed(self) -> None:
+        module = __import__("control_plane_hook")
+        self.assert_default_event_budget(module)
+        repositories = [self.seed_remote_repository(f"budget-repo-{index}") for index in range(4)]
+        real_run = module.subprocess.run
+        spawned: list[tuple[str, ...]] = []
+
+        def hanging(command, **kwargs):
+            spawned.append(tuple(command))
+            sleep_for = float(kwargs.get("timeout") or 1.0) + 5.0
+            return real_run(
+                [sys.executable, "-c", f"import time; time.sleep({sleep_for})"],
+                **kwargs,
+            )
+
+        event = self.push_authorization_event(repositories)
+        with (
+            self.event_budget(module, seconds=1.0),
+            mock.patch.object(module.subprocess, "run", side_effect=hanging),
+        ):
+            started = time.monotonic()
+            module.dispatch(event)
+            elapsed = time.monotonic() - started
+
+        # Unbounded per-child timeouts would have taken far longer than the
+        # host's ten-second hook timeout, which is a fail-open path.
+        self.assertTrue(spawned)
+        self.assertLess(elapsed, 4.0)
+        self.assertLess(len(spawned), 4 * len(repositories))
+        state = json.loads(module.state_store._state_path(self.session).read_text(encoding="utf-8"))
+        self.assertIsNone(state["local_git_grant"])
+
+    def test_git_classification_reads_are_memoized_within_one_event(self) -> None:
+        module = __import__("control_plane_hook")
+        repo = self.seed_remote_repository("memoized-remote")
+        self.seed_git_branch(repo)
+        real_run = module.subprocess.run
+        observed: list[tuple[tuple[str, ...], str | None]] = []
+
+        def counting(command, **kwargs):
+            observed.append((tuple(command), kwargs.get("cwd")))
+            return real_run(command, **kwargs)
+
+        with mock.patch.object(module.subprocess, "run", side_effect=counting):
+            module.dispatch(self.push_authorization_event([repo]))
+
+        self.assertTrue(observed)
+        self.assertEqual(len(observed), len(set(observed)))
+
+    def test_memoized_reads_do_not_leak_across_events(self) -> None:
+        module = __import__("control_plane_hook")
+        repo = self.seed_remote_repository("recheck-remote")
+        self.seed_git_branch(repo)
+        event = self.push_authorization_event([repo])
+        module.dispatch(event)
+        real_run = module.subprocess.run
+        observed: list[tuple[str, ...]] = []
+
+        def counting(command, **kwargs):
+            observed.append(tuple(command))
+            return real_run(command, **kwargs)
+
+        with mock.patch.object(module.subprocess, "run", side_effect=counting):
+            module.dispatch(event)
+
+        self.assertTrue(
+            any("get-url" in command for command in observed),
+            msg="a later event must re-read the remote instead of reusing a cache",
+        )
+
+    def test_event_budget_globals_clear_after_success_and_exception(self) -> None:
+        module = __import__("control_plane_hook")
+
+        def successful_handler(_event: dict[str, object]) -> dict[str, object]:
+            self.assertIsNotNone(module._EVENT_DEADLINE)
+            module._GIT_QUERY_CACHE[("fixture",)] = "cached"
+            return {}
+
+        with mock.patch.object(module, "_handle_tool_gate", side_effect=successful_handler):
+            self.assertEqual({}, module.dispatch({"hook_event_name": "PreToolUse"}))
+        self.assert_event_cache_cleared(module)
+
+        def failing_handler(_event: dict[str, object]) -> dict[str, object]:
+            self.assertIsNotNone(module._EVENT_DEADLINE)
+            module._GIT_QUERY_CACHE[("fixture",)] = "cached"
+            raise RuntimeError("simulated failure")
+
+        with mock.patch.object(module, "_handle_tool_gate", side_effect=failing_handler):
+            with self.assertRaises(RuntimeError):
+                module.dispatch({"hook_event_name": "PreToolUse"})
+        self.assert_event_cache_cleared(module)
+
+    def test_dispatch_snapshots_policy_and_data_directory_per_event(self) -> None:
+        module = __import__("control_plane_hook")
+        first_policy_path = Path(self.data_dir) / "policy.json"
+        observations: list[object] = []
+        with self.policy_data_directory(["Second Capital"]) as second_data_dir:
+
+            def first_handler(_event: dict[str, object]) -> dict[str, object]:
+                first_data = module._data_dir()
+                first_policy = module._policy()
+                first_policy_path.write_text(
+                    json.dumps({"sensitive_markers": ["Changed Capital"]}),
+                    encoding="utf-8",
+                )
+                os.environ["PLUGIN_DATA"] = second_data_dir
+                observations.extend(
+                    [
+                        first_data,
+                        module._data_dir(),
+                        first_policy,
+                        module._policy(),
+                    ]
+                )
+                return {}
+
+            def second_handler(_event: dict[str, object]) -> dict[str, object]:
+                observations.extend([module._data_dir(), module._policy()])
+                return {}
+
+            with (
+                mock.patch.dict(os.environ, {"PLUGIN_DATA": self.data_dir}, clear=False),
+                mock.patch.object(module, "_private_directory", wraps=module._private_directory) as private_directory,
+                mock.patch.object(module.json, "loads", wraps=module.json.loads) as json_loads,
+            ):
+                with mock.patch.object(module, "_handle_tool_gate", side_effect=first_handler):
+                    self.assertEqual({}, module.dispatch({"hook_event_name": "PreToolUse"}))
+                with mock.patch.object(module, "_handle_tool_gate", side_effect=second_handler):
+                    self.assertEqual({}, module.dispatch({"hook_event_name": "PreToolUse"}))
+
+        self.assertEqual(Path(self.data_dir), observations[0])
+        self.assertEqual(observations[0], observations[1])
+        self.assertIs(observations[2], observations[3])
+        self.assertEqual(["Example Capital"], observations[2]["markers"])
+        self.assertEqual(Path(second_data_dir), observations[4])
+        self.assertEqual(["Second Capital"], observations[5]["markers"])
+        self.assertEqual(2, private_directory.call_count)
+        self.assertEqual(2, json_loads.call_count)
+        self.assert_event_snapshot_cleared(module)
+        with mock.patch.object(module, "_handle_tool_gate", side_effect=RuntimeError("simulated failure")):
+            with self.assertRaises(RuntimeError):
+                module.dispatch({"hook_event_name": "PreToolUse"})
+        self.assert_event_snapshot_cleared(module)
 
 
 if __name__ == "__main__":
