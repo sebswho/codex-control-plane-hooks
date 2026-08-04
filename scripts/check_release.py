@@ -20,6 +20,7 @@ PLUGIN = ROOT / "plugins" / "codex-control-plane-hooks"
 REQUIRED = (
     ROOT / ".agents" / "plugins" / "marketplace.json",
     ROOT / "README.md",
+    ROOT / "docs" / "codex-app-canary.md",
     ROOT / "PRIVACY.md",
     ROOT / "SECURITY.md",
     ROOT / "LICENSE",
@@ -27,6 +28,7 @@ REQUIRED = (
     PLUGIN / "hooks" / "hooks.json",
     PLUGIN / "scripts" / "control_plane_hook.py",
     ROOT / "scripts" / "smoke_hook_manifest.py",
+    ROOT / "scripts" / "capture_codex_app_canary.py",
 )
 MAX_SCAN_FILE_BYTES = 2_000_000
 MAX_PRIVATE_PATTERNS_BYTES = 64_000

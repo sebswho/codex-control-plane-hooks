@@ -11,6 +11,7 @@
 | Windows runtime setup, runtime manifest publication, and runtime pruning | `test_setup_runtime.py` |
 | Public Windows launcher behavior and façade exit-code compatibility | `test_control_plane_hook.py` until the façade/launcher extraction ticket moves that boundary |
 | Release candidate layout, manifest coverage, CI gates, and release checker behavior | `test_release_layout.py` |
+| Read-only Codex App canary inventory, provenance, runtime, artifact hashes, and evidence redaction | `test_capture_codex_app_canary.py` |
 | Dedicated `UserPromptSubmit` entrypoint equivalence | `test_user_prompt_entrypoint.py` |
 
 Shared protocol fixtures live in `protocol_test_fixtures.py`. They own the subprocess harness and reusable fixtures for the six-second event budget, event-cache teardown, policy/data-directory snapshots, and legacy serialized state. Focused modules should add regressions to their owning file rather than growing `test_control_plane_hook.py` unless the scenario crosses multiple contract surfaces.

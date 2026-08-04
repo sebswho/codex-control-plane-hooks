@@ -186,6 +186,7 @@ Detailed contracts:
 - [Configuration](docs/configuration.md)
 - [Hook contract](docs/hook-contract.md)
 - [Threat model](docs/threat-model.md)
+- [Codex App canary and exact-SHA development workflow](docs/codex-app-canary.md)
 
 ## Event model
 

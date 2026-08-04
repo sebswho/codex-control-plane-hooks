@@ -39,6 +39,11 @@ class ReleaseLayoutTests(unittest.TestCase):
         )
         self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
 
+    def test_release_checker_requires_app_canary_tool_and_guide(self) -> None:
+        required = {path.relative_to(ROOT).as_posix() for path in CHECKER.REQUIRED}
+        self.assertIn("scripts/capture_codex_app_canary.py", required)
+        self.assertIn("docs/codex-app-canary.md", required)
+
     def test_release_checker_scans_itself_and_compound_suffix_examples(self) -> None:
         scanned = {path.relative_to(ROOT).as_posix() for path in CHECKER.release_files()}
         self.assertIn("scripts/check_release.py", scanned)
