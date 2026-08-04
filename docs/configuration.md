@@ -23,6 +23,8 @@ Windows 启动器只使用 `scripts/setup_runtime.ps1` 创建的 `PLUGIN_DATA/ru
 
 插件数据目录按以下顺序选择：绝对 `-PluginDataPath`、宿主提供的绝对 `PLUGIN_DATA`，最后是在绝对 `-CodexHome` 或 Windows 用户 Profile 默认 `.codex` 目录下的唯一插件候选。位于 `plugins\data` 之外的路径、相对路径、零个或多个候选以及观察到的 reparse point 都会关闭失败。
 
+Codex CLI 0.146 为 selector `codex-control-plane-hooks@codex-control-plane-hooks` 提供的活动目录名是 `codex-control-plane-hooks-codex-control-plane-hooks`。安装或重钉 SHA 时应显式创建该目录，并将其作为 `-PluginDataPath`；无后缀 `codex-control-plane-hooks` 目录仅作为保留的 legacy 数据，不能代替活动目录，也不得在未设计 copy-only 迁移前删除或覆盖。
+
 运行时版本位于 `%USERPROFILE%\.codex\runtimes\codex-control-plane-hooks\versions`。脚本先创建并冒烟验证 staging venv，再原子发布 `runtime.json`；失败不会破坏原有清单。重复执行是幂等的。默认保留旧版本；`-PruneOldRuntime -Keep N` 要求 `N >= 2`，保护当前版本，并跳过正在使用或无法检查的候选。venv 依赖基础 Python 3.12 安装，不是自包含发行版。
 
 启动器不读取 `PATH`，也不调用 `where.exe`、`py.exe` 或其他 Python 发现机制。它严格校验清单 schema、UTF-8、字段、Windows Profile API 返回的固定根目录、解释器布局和 reparse point，并在一个 `python.exe -I -S -c` 子进程中验证 Python 3.12 后执行 Hook。缺少 `PLUGIN_DATA` 或 `runtime.json` 返回 `127`；其余配置、信任、启动或版本错误返回 `126`；Hook 自身退出码原样返回。

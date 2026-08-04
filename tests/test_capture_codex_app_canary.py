@@ -143,6 +143,72 @@ class CaptureCodexAppCanaryTests(unittest.TestCase):
         self.assertEqual(1, summary["plugin_count"])
         self.assertEqual(2, summary["installed_plugin_total_count"])
 
+    def test_app_bundled_hooks_inventory_requires_exact_trusted_plugin_hooks(self) -> None:
+        manifest = json.loads(
+            (ROOT / "plugins" / "codex-control-plane-hooks" / "hooks" / "hooks.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        hooks = []
+        for event_name, groups in manifest["hooks"].items():
+            for group in groups:
+                for index, handler in enumerate(group["hooks"]):
+                    hooks.append(
+                        {
+                            "key": f"{event_name}-{index}",
+                            "eventName": event_name[:1].lower() + event_name[1:],
+                            "source": "plugin",
+                            "pluginId": "codex-control-plane-hooks@codex-control-plane-hooks",
+                            "handlerType": handler["type"],
+                            "enabled": True,
+                            "trustStatus": "trusted",
+                            "currentHash": "sha256:" + "a" * 64,
+                            "sourcePath": r"C:\private\plugin\hooks.json",
+                        }
+                    )
+        payload = {
+            "data": [
+                {
+                    "cwd": str(ROOT),
+                    "warnings": [],
+                    "errors": [],
+                    "hooks": hooks,
+                }
+            ]
+        }
+
+        summary = CANARY.validate_app_hook_inventory(
+            payload,
+            cwd=ROOT,
+            manifest=manifest,
+            selector="codex-control-plane-hooks@codex-control-plane-hooks",
+        )
+
+        self.assertEqual(len(hooks), summary["hook_count"])
+        self.assertTrue(summary["all_trusted"])
+        self.assertEqual({"trusted": len(hooks)}, summary["trust_status_counts"])
+        self.assertNotIn("sourcePath", json.dumps(summary))
+
+        untrusted = json.loads(json.dumps(payload))
+        untrusted["data"][0]["hooks"][0]["trustStatus"] = "untrusted"
+        with self.assertRaisesRegex(CANARY.CanaryError, "trusted"):
+            CANARY.validate_app_hook_inventory(
+                untrusted,
+                cwd=ROOT,
+                manifest=manifest,
+                selector="codex-control-plane-hooks@codex-control-plane-hooks",
+            )
+
+        missing = json.loads(json.dumps(payload))
+        missing["data"][0]["hooks"].pop()
+        with self.assertRaisesRegex(CANARY.CanaryError, "events"):
+            CANARY.validate_app_hook_inventory(
+                missing,
+                cwd=ROOT,
+                manifest=manifest,
+                selector="codex-control-plane-hooks@codex-control-plane-hooks",
+            )
+
     def test_checkout_metadata_requires_clean_exact_sha_and_authorized_fork(self) -> None:
         commit = "a" * 40
         summary = CANARY.validate_checkout_metadata(
@@ -183,6 +249,78 @@ class CaptureCodexAppCanaryTests(unittest.TestCase):
                 origin="https://github.com/sebswho/codex-control-plane-hooks.git",
                 status=" M README.md",
             )
+
+    def test_plugin_data_discovery_selects_active_selector_without_deleting_legacy_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            codex_home = Path(directory)
+            root = codex_home / "plugins" / "data"
+            legacy = root / "codex-control-plane-hooks"
+            active = root / "codex-control-plane-hooks-codex-control-plane-hooks"
+            legacy.mkdir(parents=True)
+            active.mkdir()
+            (legacy / "session-legacy.json").write_text("{}", encoding="utf-8")
+            (active / "runtime.json").write_text("{}", encoding="utf-8")
+
+            selected = CANARY.discover_plugin_data(
+                codex_home,
+                "codex-control-plane-hooks",
+                "codex-control-plane-hooks",
+            )
+
+            self.assertEqual(active, selected)
+            self.assertTrue((legacy / "session-legacy.json").is_file())
+
+    def test_plugin_data_discovery_rejects_matching_name_outside_codex_home(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex_home = root / "codex-home"
+            active = (
+                codex_home
+                / "plugins"
+                / "data"
+                / "codex-control-plane-hooks-codex-control-plane-hooks"
+            )
+            outside = root / "outside" / active.name
+            active.mkdir(parents=True)
+            outside.mkdir(parents=True)
+
+            with mock.patch.dict(os.environ, {"PLUGIN_DATA": str(outside)}):
+                with self.assertRaisesRegex(CANARY.CanaryError, "selector path"):
+                    CANARY.discover_plugin_data(
+                        codex_home,
+                        "codex-control-plane-hooks",
+                        "codex-control-plane-hooks",
+                    )
+
+    def test_plugin_data_inventory_reports_active_and_legacy_metadata_without_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            codex_home = Path(directory)
+            root = codex_home / "plugins" / "data"
+            legacy = root / "codex-control-plane-hooks"
+            active = root / "codex-control-plane-hooks-codex-control-plane-hooks"
+            legacy.mkdir(parents=True)
+            active.mkdir()
+            (legacy / "runtime.json").write_text("{}", encoding="utf-8")
+            (legacy / "session-legacy.json").write_text("{}", encoding="utf-8")
+            (active / "runtime.json").write_text("{}", encoding="utf-8")
+            (active / "session-current.json").write_text("{}", encoding="utf-8")
+
+            summary = CANARY.plugin_data_inventory(
+                codex_home,
+                "codex-control-plane-hooks",
+                "codex-control-plane-hooks",
+            )
+
+            self.assertEqual(
+                "codex-control-plane-hooks-codex-control-plane-hooks",
+                summary["active_directory_name"],
+            )
+            self.assertEqual(1, summary["active_state_file_count"])
+            self.assertTrue(summary["active_runtime_manifest_exists"])
+            self.assertEqual(1, summary["legacy_candidate_count"])
+            self.assertEqual(1, summary["legacy_runtime_manifest_count"])
+            self.assertEqual(1, summary["legacy_state_file_count"])
+            self.assertNotIn(str(codex_home), json.dumps(summary))
 
     def test_runtime_manifest_requires_existing_python_312_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

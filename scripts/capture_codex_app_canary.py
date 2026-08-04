@@ -4,13 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import collections
+import contextlib
 import hashlib
 import json
 import os
+import queue
 import re
+import shutil
 import stat
 import subprocess
 import sys
+import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -124,6 +130,101 @@ def run_command(executable: Path, arguments: list[str], cwd: Path | None = None)
     return completed.stdout.strip()
 
 
+class AppServer:
+    EOF = object()
+
+    def __init__(self, codex: Path, environment: dict[str, str], cwd: Path) -> None:
+        self.process = subprocess.Popen(
+            command_argv(codex, [*CLI_BASE, "app-server", "--listen", "stdio://"]),
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        require(self.process.stdin is not None, "app-server stdin is unavailable")
+        require(self.process.stdout is not None, "app-server stdout is unavailable")
+        require(self.process.stderr is not None, "app-server stderr is unavailable")
+        self.stdin = self.process.stdin
+        self.stdout = self.process.stdout
+        self.stderr = self.process.stderr
+        self.messages: queue.Queue[object] = queue.Queue()
+        self.reader = threading.Thread(target=self._read, daemon=True)
+        self.reader.start()
+        self.next_id = 1
+
+    def _read(self) -> None:
+        for line in self.stdout:
+            self.messages.put(line)
+        self.messages.put(self.EOF)
+
+    def _send(self, value: dict[str, Any]) -> None:
+        self.stdin.write(json.dumps(value, separators=(",", ":")) + "\n")
+        self.stdin.flush()
+
+    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        request_id = self.next_id
+        self.next_id += 1
+        self._send({"id": request_id, "method": method, "params": params})
+        deadline = time.monotonic() + 30
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CanaryError(f"app-server request timed out: {method}")
+            try:
+                line = self.messages.get(timeout=remaining)
+            except queue.Empty as exc:
+                raise CanaryError(f"app-server request timed out: {method}") from exc
+            require(line is not self.EOF, f"app-server exited during {method}")
+            require(isinstance(line, str), "app-server stdout queue contained a non-string")
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise CanaryError("app-server emitted non-JSON stdout") from exc
+            if message.get("id") != request_id:
+                continue
+            require("error" not in message, f"app-server {method} returned an error")
+            result = message.get("result")
+            require(isinstance(result, dict), f"app-server {method} result is not an object")
+            return result
+
+    def initialize(self, codex_home: Path) -> None:
+        result = self.request(
+            "initialize",
+            {
+                "clientInfo": {
+                    "name": "codex-control-plane-hooks-app-canary",
+                    "version": "1.0.0",
+                },
+                "capabilities": {"experimentalApi": False},
+            },
+        )
+        require(
+            Path(str(result.get("codexHome") or "")).resolve() == codex_home,
+            "app-server CODEX_HOME mismatch",
+        )
+        self._send({"method": "initialized"})
+
+    def close(self) -> None:
+        with contextlib.suppress(OSError):
+            self.stdin.close()
+        try:
+            self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+        self.reader.join(timeout=2)
+        self.stdout.close()
+        self.stderr.close()
+
+
 def parse_json_output(output: str, label: str) -> Any:
     candidates = [output]
     first_object = output.find("{")
@@ -144,6 +245,73 @@ def _list_field(payload: Any, field: str, label: str) -> list[Any]:
     rows = payload.get(field)
     require(isinstance(rows, list), f"{label} JSON must contain a {field} list")
     return rows
+
+
+def validate_app_hook_inventory(
+    payload: Any,
+    *,
+    cwd: Path,
+    manifest: dict[str, Any],
+    selector: str,
+) -> dict[str, Any]:
+    require(isinstance(payload, dict), "hooks/list result must be an object")
+    entries = payload.get("data")
+    require(isinstance(entries, list) and len(entries) == 1, "hooks/list returned an unexpected cwd set")
+    entry = entries[0]
+    require(isinstance(entry, dict), "hooks/list cwd entry must be an object")
+    require(Path(str(entry.get("cwd") or "")).resolve() == cwd.resolve(), "hooks/list cwd mismatch")
+    require(entry.get("warnings") == [], "hooks/list returned warnings")
+    require(entry.get("errors") == [], "hooks/list returned errors")
+    rows = entry.get("hooks")
+    require(isinstance(rows, list), "hooks/list hooks must be an array")
+
+    expected: collections.Counter[str] = collections.Counter()
+    hook_groups = manifest.get("hooks") if isinstance(manifest, dict) else None
+    require(isinstance(hook_groups, dict), "installed hooks manifest is invalid")
+    for event_name, groups in hook_groups.items():
+        require(isinstance(groups, list), "installed hooks manifest event groups are invalid")
+        for group in groups:
+            handlers = group.get("hooks") if isinstance(group, dict) else None
+            require(isinstance(handlers, list), "installed hooks manifest handlers are invalid")
+            expected[event_name[:1].lower() + event_name[1:]] += sum(
+                isinstance(handler, dict) and handler.get("type") == "command" for handler in handlers
+            )
+
+    target = [row for row in rows if isinstance(row, dict) and row.get("pluginId") == selector]
+    actual = collections.Counter(str(row.get("eventName") or "") for row in target)
+    require(actual == expected, f"App bundled hooks/list target events mismatch: {dict(actual)}")
+    require(all(row.get("source") == "plugin" for row in target), "target Hook source is not plugin")
+    require(all(row.get("handlerType") == "command" for row in target), "target Hook handler type changed")
+    require(all(row.get("enabled") is True for row in target), "target Hook is disabled")
+    trust_counts = collections.Counter(str(row.get("trustStatus") or "missing") for row in target)
+    require(trust_counts == {"trusted": len(target)}, "target Hooks are not all trusted")
+    require(
+        all(re.fullmatch(r"sha256:[0-9a-f]{64}", str(row.get("currentHash") or "")) for row in target),
+        "target Hook currentHash is invalid",
+    )
+    return {
+        "hook_count": len(target),
+        "host_total_hook_count": len(rows),
+        "event_counts": dict(sorted(actual.items())),
+        "trust_status_counts": dict(sorted(trust_counts.items())),
+        "all_enabled": True,
+        "all_trusted": True,
+        "hash_algorithm": "sha256",
+    }
+
+
+def collect_app_hook_inventory(
+    codex: Path,
+    *,
+    codex_home: Path,
+    cwd: Path,
+    manifest: dict[str, Any],
+    selector: str,
+) -> dict[str, Any]:
+    with contextlib.closing(AppServer(codex, child_environment(), cwd)) as server:
+        server.initialize(codex_home)
+        payload = server.request("hooks/list", {"cwds": [str(cwd)]})
+    return validate_app_hook_inventory(payload, cwd=cwd, manifest=manifest, selector=selector)
 
 
 def validate_inventory(
@@ -548,20 +716,51 @@ def discover_installed_root(codex_home: Path, marketplace: str, plugin: str, ver
     return version_root
 
 
-def discover_plugin_data(codex_home: Path, plugin: str) -> Path:
+def discover_plugin_data(codex_home: Path, plugin: str, marketplace: str) -> Path:
+    expected_name = f"{plugin}-{marketplace}"
+    expected = codex_home / "plugins" / "data" / expected_name
     configured = os.environ.get("PLUGIN_DATA")
     if configured:
         candidate = Path(configured).expanduser()
         require(candidate.is_absolute(), "PLUGIN_DATA must be absolute")
         require(candidate.is_dir(), "PLUGIN_DATA directory is missing")
+        require(
+            candidate.resolve() == expected.resolve(),
+            "PLUGIN_DATA does not match the active plugin selector path",
+        )
         return candidate
+    require(expected.parent.is_dir(), "plugin data directory is missing")
+    require(expected.is_dir(), "active plugin data directory is missing")
+    return expected
+
+
+def plugin_data_inventory(codex_home: Path, plugin: str, marketplace: str) -> dict[str, Any]:
     root = codex_home / "plugins" / "data"
     require(root.is_dir(), "plugin data directory is missing")
-    candidates = sorted(
-        path for path in root.iterdir() if path.is_dir() and (path.name == plugin or path.name.startswith(f"{plugin}-"))
-    )
-    require(len(candidates) == 1, "expected exactly one plugin data directory")
-    return candidates[0]
+    active_name = f"{plugin}-{marketplace}"
+    active = root / active_name
+    require(active.is_dir(), "active plugin data directory is missing")
+
+    legacy_candidates = [
+        candidate
+        for candidate in root.iterdir()
+        if candidate.name != active_name
+        and (candidate.name == plugin or candidate.name.startswith(f"{plugin}-"))
+        and candidate.is_dir()
+        and not _is_reparse_point(candidate)
+    ]
+    return {
+        "active_directory_name": active_name,
+        "active_runtime_manifest_exists": (active / "runtime.json").is_file(),
+        "active_state_file_count": sum(1 for _path in active.glob("session-*.json")),
+        "legacy_candidate_count": len(legacy_candidates),
+        "legacy_runtime_manifest_count": sum(
+            1 for candidate in legacy_candidates if (candidate / "runtime.json").is_file()
+        ),
+        "legacy_state_file_count": sum(
+            1 for candidate in legacy_candidates for _path in candidate.glob("session-*.json")
+        ),
+    }
 
 
 def sanitize_evidence(value: Any, path_replacements: dict[str, str]) -> tuple[Any, int]:
@@ -645,8 +844,15 @@ def _tool_versions(codex: Path, checkout: Path) -> dict[str, str]:
         ["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"],
         cwd=checkout,
     )
+    external = shutil.which("codex")
+    external_version = (
+        run_command(Path(external), ["--version"], cwd=checkout)
+        if external is not None
+        else "not_available"
+    )
     return {
-        "external_codex_cli": run_command(codex, ["--version"], cwd=checkout),
+        "app_bundled_cli": run_command(codex, ["--version"], cwd=checkout),
+        "external_codex_cli": external_version,
         "powershell": powershell_version,
         "collector_python": ".".join(str(part) for part in sys.version_info[:3]),
     }
@@ -654,7 +860,7 @@ def _tool_versions(codex: Path, checkout: Path) -> dict[str, str]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--codex", required=True, type=Path, help="Absolute Codex CLI .exe/.cmd/.ps1 path")
+    parser.add_argument("--codex", required=True, type=Path, help="Absolute Codex App bundled CLI path")
     parser.add_argument("--expected-checkout", required=True, type=Path, help="Clean checkout used for hash comparison")
     parser.add_argument("--expected-commit", required=True, help="Full 40-character commit SHA")
     parser.add_argument(
@@ -709,7 +915,7 @@ def collect_evidence(args: argparse.Namespace) -> dict[str, Any]:
         args.plugin,
         inventory["version"],
     )
-    plugin_data = discover_plugin_data(codex_home, args.plugin)
+    plugin_data = discover_plugin_data(codex_home, args.plugin, args.marketplace)
     user_profile = trusted_user_profile()
     runtime = validate_runtime_manifest(
         plugin_data / "runtime.json",
@@ -719,7 +925,21 @@ def collect_evidence(args: argparse.Namespace) -> dict[str, Any]:
     )
     expected_plugin_root = checkout / "plugins" / args.plugin
     artifacts = compare_artifact_hashes(expected_plugin_root, installed_root)
+    installed_manifest = json.loads((installed_root / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    app_hooks = collect_app_hook_inventory(
+        codex,
+        codex_home=codex_home,
+        cwd=checkout,
+        manifest=installed_manifest,
+        selector=inventory["selector"],
+    )
     scenarios = parse_scenarios(args.scenario)
+    versions = _tool_versions(codex, checkout)
+    if args.bundled_cli_version != "not_recorded":
+        require(
+            args.bundled_cli_version in versions["app_bundled_cli"],
+            "recorded bundled CLI version does not match the App bundled executable",
+        )
 
     evidence: dict[str, Any] = {
         "schema_version": 1,
@@ -732,17 +952,18 @@ def collect_evidence(args: argparse.Namespace) -> dict[str, Any]:
         },
         "versions": {
             "codex_app": args.app_version,
-            "app_bundled_cli": args.bundled_cli_version,
-            **_tool_versions(codex, checkout),
+            **versions,
             "plugin_runtime_python": runtime["python_version"],
         },
         "inventory": inventory,
+        "app_hooks": app_hooks,
+        "plugin_data": plugin_data_inventory(codex_home, args.plugin, args.marketplace),
         "runtime": runtime,
         "artifacts": artifacts,
         "scenarios": scenarios,
         "ready": evidence_ready(
             args.app_version,
-            args.bundled_cli_version,
+            versions["app_bundled_cli"],
             scenarios,
             args.phase,
         ),

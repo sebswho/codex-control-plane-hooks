@@ -65,18 +65,9 @@ def child_environment(codex_home: Path) -> dict[str, str]:
 def installed_plugin_data(codex_home: Path) -> Path:
     root = codex_home / "plugins" / "data"
     root.mkdir(parents=True, exist_ok=True)
-    candidates = sorted(
-        path
-        for path in root.iterdir()
-        if path.is_dir()
-        and (path.name == PLUGIN or path.name.startswith(f"{PLUGIN}-"))
-    )
-    if not candidates:
-        candidate = root / PLUGIN
-        candidate.mkdir()
-        return candidate
-    require(len(candidates) == 1, f"unexpected plugin-data directories: {candidates}")
-    return candidates[0]
+    candidate = root / f"{PLUGIN}-{PLUGIN}"
+    candidate.mkdir(exist_ok=True)
+    return candidate
 
 
 def run_codex(
@@ -507,6 +498,10 @@ def grant_debug(codex_home: Path) -> list[dict[str, Any]]:
     return snapshots
 
 
+def runtime_case_sandbox(name: str) -> str:
+    return "danger-full-access" if name == "dangerous" else "read-only"
+
+
 def runtime_case(codex: Path, environment: dict[str, str], cwd: Path, name: str, command: str) -> str:
     call_id = f"host-smoke-{name}"
     with responses_server([(command, call_id)]) as (base_url, state):
@@ -525,7 +520,7 @@ def runtime_case(codex: Path, environment: dict[str, str], cwd: Path, name: str,
                 "--ask-for-approval", "never",
                 "exec", "--strict-config", "--json", "--ephemeral", "--ignore-rules",
                 "--skip-git-repo-check", "--color", "never",
-                "--sandbox", "read-only", "--model", MODEL, "--cd", str(cwd),
+                "--sandbox", runtime_case_sandbox(name), "--model", MODEL, "--cd", str(cwd),
                 f"Run the deterministic {name} host-smoke tool call.",
             ],
             environment,
@@ -676,6 +671,10 @@ def verify_transaction_resume(
     )
 
 
+def is_pretool_hook_denial(output: str) -> bool:
+    return output.startswith("Command blocked by PreToolUse hook:")
+
+
 def verify_runtime(
     codex: Path,
     environment: dict[str, str],
@@ -691,19 +690,16 @@ def verify_runtime(
     )
     dangerous = runtime_case(
         codex, environment, cwd, "dangerous",
-        "git commit -m codex-host-smoke || " f'python -c "{fallback}"',
+        "git add --all && " f'python -c "{fallback}"',
     )
-    legacy_denial = dangerous.startswith("Command blocked by PreToolUse hook:")
-    policy_denial = dangerous.rstrip().endswith("rejected: blocked by policy")
     require(
-        legacy_denial or policy_denial,
-        f"dangerous command did not return a Hook denial: {dangerous}",
+        is_pretool_hook_denial(dangerous),
+        f"dangerous command did not return an explicit PreToolUse Hook denial: {dangerous}",
     )
-    if legacy_denial:
-        require(
-            "git_non_read_only" in dangerous,
-            f"legacy Hook denial omitted git_non_read_only: {dangerous}",
-        )
+    require(
+        "git_non_read_only" in dangerous,
+        f"Hook denial omitted git_non_read_only: {dangerous}",
+    )
     require(
         not dangerous_marker.exists(),
         f"dangerous fallback created its marker despite Hook denial: {dangerous}",
