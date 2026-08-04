@@ -5,7 +5,7 @@ This checklist is the release gate for Phase 1.5 and for every later ticket that
 ## Invariants
 
 - Operate only on the authorized fork, `sebswho/codex-control-plane-hooks`.
-- Install exactly one marketplace named `codex-control-plane-hooks` and exactly one plugin selector, `codex-control-plane-hooks@codex-control-plane-hooks`.
+- Install exactly one target marketplace named `codex-control-plane-hooks` and exactly one target plugin selector, `codex-control-plane-hooks@codex-control-plane-hooks`. Unrelated App-managed marketplaces such as `openai-api-curated` do not count as a second target instance.
 - Pin every marketplace installation to a full 40-character commit SHA. Never use `main`, a feature branch, a floating tag, or unattended marketplace upgrades for a development canary.
 - Keep newly introduced experimental behavior disabled unless the current ticket explicitly tests that behavior.
 - Never remove `PLUGIN_DATA`, `runtime.json`, or `session-*.json` during a reinstall or rollback.
@@ -43,7 +43,7 @@ Record the App version from the App diagnostics or About surface. Record the bun
 & $Codex plugin list --json
 ```
 
-Stop if more than one marketplace or installed plugin is present, if the selector is ambiguous, or if an unrelated installation would be removed. The intended development steady state has one marketplace and one installed plugin. A formal and a development copy must not be active together.
+Stop if more than one marketplace named `codex-control-plane-hooks` or more than one installed `codex-control-plane-hooks` plugin is present, if the selector is ambiguous, or if an unrelated installation would be removed. Record unrelated App-managed marketplaces/plugins, but do not remove them and do not count them as a duplicate target instance. The intended development steady state has one target marketplace and one target plugin. A formal and a development copy must not be active together.
 
 Before repinning, record only hashes and file metadata for `runtime.json` and any existing `session-*.json`. Do not copy their contents into repository evidence.
 

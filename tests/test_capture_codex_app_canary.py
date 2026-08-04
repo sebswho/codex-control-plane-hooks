@@ -115,6 +115,34 @@ class CaptureCodexAppCanaryTests(unittest.TestCase):
                 plugin="codex-control-plane-hooks",
             )
 
+    def test_inventory_allows_unrelated_builtin_marketplaces_and_plugins(self) -> None:
+        marketplaces = self.valid_marketplaces()
+        marketplaces["marketplaces"].append(
+            {"name": "openai-api-curated", "root": r"C:\private\codex-home\.tmp\plugins"}
+        )
+        plugins = self.valid_plugins()
+        plugins["installed"].append(
+            {
+                "pluginId": "unrelated@openai-api-curated",
+                "name": "unrelated",
+                "marketplaceName": "openai-api-curated",
+                "installed": True,
+                "enabled": True,
+            }
+        )
+
+        summary = CANARY.validate_inventory(
+            marketplaces,
+            plugins,
+            marketplace="codex-control-plane-hooks",
+            plugin="codex-control-plane-hooks",
+        )
+
+        self.assertEqual(1, summary["marketplace_count"])
+        self.assertEqual(2, summary["marketplace_total_count"])
+        self.assertEqual(1, summary["plugin_count"])
+        self.assertEqual(2, summary["installed_plugin_total_count"])
+
     def test_checkout_metadata_requires_clean_exact_sha_and_authorized_fork(self) -> None:
         commit = "a" * 40
         summary = CANARY.validate_checkout_metadata(

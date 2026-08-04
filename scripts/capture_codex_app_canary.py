@@ -156,16 +156,25 @@ def validate_inventory(
     require(marketplace == PLUGIN_NAME, "marketplace name is not the fixed canary name")
     require(plugin == PLUGIN_NAME, "plugin name is not the fixed canary name")
     marketplaces = _list_field(marketplace_payload, "marketplaces", "marketplace list")
-    require(len(marketplaces) == 1, "Codex must expose exactly one marketplace during the canary")
-    marketplace_row = marketplaces[0]
-    require(isinstance(marketplace_row, dict), "marketplace row must be an object")
-    require(marketplace_row.get("name") == marketplace, "the configured marketplace name does not match")
+    require(all(isinstance(row, dict) for row in marketplaces), "marketplace row must be an object")
+    matching_marketplaces = [row for row in marketplaces if row.get("name") == marketplace]
+    require(
+        len(matching_marketplaces) == 1,
+        f"Codex must expose exactly one marketplace named {marketplace} during the canary",
+    )
+    marketplace_row = matching_marketplaces[0]
 
     installed = _list_field(plugin_payload, "installed", "plugin list")
-    require(len(installed) == 1, "Codex must expose exactly one installed plugin during the canary")
-    plugin_row = installed[0]
-    require(isinstance(plugin_row, dict), "installed plugin row must be an object")
+    require(all(isinstance(row, dict) for row in installed), "installed plugin row must be an object")
     selector = f"{plugin}@{marketplace}"
+    matching_plugins = [
+        row for row in installed if row.get("name") == plugin or row.get("pluginId") == selector
+    ]
+    require(
+        len(matching_plugins) == 1,
+        f"Codex must expose exactly one installed plugin instance named {plugin} during the canary",
+    )
+    plugin_row = matching_plugins[0]
     require(plugin_row.get("pluginId") == selector, "the installed plugin selector does not match")
     require(plugin_row.get("name") == plugin, "the installed plugin name does not match")
     require(plugin_row.get("marketplaceName") == marketplace, "the plugin marketplace does not match")
@@ -187,9 +196,11 @@ def validate_inventory(
     )
     return {
         "marketplace": marketplace,
-        "marketplace_count": len(marketplaces),
+        "marketplace_count": len(matching_marketplaces),
+        "marketplace_total_count": len(marketplaces),
         "plugin": plugin,
-        "plugin_count": len(installed),
+        "plugin_count": len(matching_plugins),
+        "installed_plugin_total_count": len(installed),
         "selector": selector,
         "version": version,
         "enabled": True,
