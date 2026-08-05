@@ -581,6 +581,28 @@ class CaptureCodexAppCanaryTests(unittest.TestCase):
         merged["app_restart_same_sha"] = "failed"
         self.assertFalse(CANARY.evidence_ready("26.804.1", "0.146.0", merged, "merged"))
 
+    def test_safe_allow_attribution_is_optional_and_requires_a_complete_passed_pair(self) -> None:
+        scenarios = {name: "not_recorded" for name in CANARY.REQUIRED_SCENARIOS}
+        self.assertIsNone(CANARY.safe_allow_attribution(None, None, scenarios))
+
+        scenarios["safe_allow"] = "passed"
+        self.assertEqual(
+            {
+                "hook_response": "no_decision",
+                "host_approval_mode": "on-request",
+            },
+            CANARY.safe_allow_attribution("no_decision", "on-request", scenarios),
+        )
+
+        with self.assertRaisesRegex(CANARY.CanaryError, "provided together"):
+            CANARY.safe_allow_attribution("no_decision", None, scenarios)
+        with self.assertRaisesRegex(CANARY.CanaryError, "safe_allow=passed"):
+            CANARY.safe_allow_attribution(
+                "no_decision",
+                "on-request",
+                {name: "not_recorded" for name in CANARY.REQUIRED_SCENARIOS},
+            )
+
     def test_parser_exposes_fixed_interface_and_optional_app_evidence(self) -> None:
         parser = CANARY.build_parser()
         args = parser.parse_args(
@@ -605,10 +627,16 @@ class CaptureCodexAppCanaryTests(unittest.TestCase):
                 "0.146.0",
                 "--scenario",
                 "safe_allow=passed",
+                "--safe-hook-response",
+                "no_decision",
+                "--host-approval-mode",
+                "on-request",
             ]
         )
         self.assertEqual("a" * 40, args.expected_commit)
         self.assertEqual(["safe_allow=passed"], args.scenario)
+        self.assertEqual("no_decision", args.safe_hook_response)
+        self.assertEqual("on-request", args.host_approval_mode)
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             parser.parse_args(
                 [

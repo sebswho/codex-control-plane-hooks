@@ -825,6 +825,24 @@ def parse_scenarios(values: list[str]) -> dict[str, str]:
     return scenarios
 
 
+def safe_allow_attribution(
+    hook_response: str | None,
+    host_approval_mode: str | None,
+    scenarios: dict[str, str],
+) -> dict[str, str] | None:
+    provided = (hook_response is not None, host_approval_mode is not None)
+    require(provided[0] == provided[1], "safe Hook response and host approval mode must be provided together")
+    if not any(provided):
+        return None
+    require(scenarios.get("safe_allow") == "passed", "safe attribution requires safe_allow=passed")
+    require(hook_response == "no_decision", "safe Hook response must be no_decision")
+    require(bool(host_approval_mode and host_approval_mode.strip()), "host approval mode must not be blank")
+    return {
+        "hook_response": hook_response,
+        "host_approval_mode": host_approval_mode,
+    }
+
+
 def evidence_ready(app_version: str, bundled_cli_version: str, scenarios: dict[str, str], phase: str) -> bool:
     required = FEATURE_REQUIRED_SCENARIOS if phase == "feature" else MERGED_REQUIRED_SCENARIOS
     return (
@@ -832,6 +850,7 @@ def evidence_ready(app_version: str, bundled_cli_version: str, scenarios: dict[s
         and bundled_cli_version != "not_recorded"
         and all(scenarios.get(name) == "passed" for name in required)
     )
+
 
 def _codex_json(codex: Path, arguments: list[str], label: str, cwd: Path) -> Any:
     return parse_json_output(run_command(codex, [*CLI_BASE, *arguments], cwd=cwd), label)
@@ -881,6 +900,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="NAME=STATUS",
         help="Record a canary scenario as passed, failed, not_run, or not_recorded",
+    )
+    parser.add_argument(
+        "--safe-hook-response",
+        choices=("no_decision",),
+        help="Optional protocol result for the safe_allow probe",
+    )
+    parser.add_argument(
+        "--host-approval-mode",
+        help="Optional Codex App approval mode used for the safe_allow probe",
     )
     return parser
 
@@ -934,6 +962,11 @@ def collect_evidence(args: argparse.Namespace) -> dict[str, Any]:
         selector=inventory["selector"],
     )
     scenarios = parse_scenarios(args.scenario)
+    safe_attribution = safe_allow_attribution(
+        args.safe_hook_response,
+        args.host_approval_mode,
+        scenarios,
+    )
     versions = _tool_versions(codex, checkout)
     if args.bundled_cli_version != "not_recorded":
         require(
@@ -968,6 +1001,8 @@ def collect_evidence(args: argparse.Namespace) -> dict[str, Any]:
             args.phase,
         ),
     }
+    if safe_attribution is not None:
+        evidence["safe_allow_attribution"] = safe_attribution
     sanitized, replacements = sanitize_evidence(
         evidence,
         {

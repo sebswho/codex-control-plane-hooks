@@ -16,6 +16,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_SOURCE = ROOT / "plugins" / "codex-control-plane-hooks"
+SAFE_ALLOW_PROBE = "git status --short"
 WINDOWS_SHELL_EXECUTABLES = {"pwsh": "pwsh", "powershell": "powershell.exe"}
 
 
@@ -147,11 +148,11 @@ def main() -> int:
             payload={
                 **base_event,
                 "tool_use_id": "safe-tool",
-                "tool_input": {"command": "git status --short"},
+                "tool_input": {"command": SAFE_ALLOW_PROBE},
             },
         )
         if safe_response != {}:
-            raise RuntimeError("safe manifest smoke command was not allowed")
+            raise RuntimeError("safe manifest smoke command returned a Hook decision")
 
         denied_response = _run_command(
             handler,

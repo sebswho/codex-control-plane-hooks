@@ -96,10 +96,18 @@ Verify that `$ActivePluginData\runtime.json` now exists. A launcher error, missi
 
 Reopen the App only after the closed-App inventory and active `runtime.json` are correct. Review the installed `hooks.json`, PowerShell launcher, and Python façade, then verify the App reports the target Hook as enabled and trusted. Do not automate, bypass, or infer the trust decision from a shell exit code.
 
+Before the real-App run, execute the protocol smoke from the exact checkout SHA:
+
+```powershell
+& $Python -B scripts\smoke_hook_manifest.py --windows-shell pwsh
+```
+
+The smoke uses the same `git status --short` probe and fails unless `PreToolUse` returns exactly `{}`. This proves Hook non-interference only; it does not grant or predict native host approval.
+
 Run these scenarios in the real App and record only `passed`, `failed`, `not_run`, or `not_recorded`:
 
 1. `untrusted_to_trusted`: Hook discovery is initially untrusted and becomes trusted only after explicit review.
-2. `safe_allow`: a deterministic safe command is allowed.
+2. `safe_allow`: run the exact deterministic probe `git status --short`. The protocol smoke for the same SHA must return exactly `{}` from `PreToolUse` (no `permissionDecision: allow`), and the real App must execute the command without a Hook authorization prompt. Native host approval behavior remains owned by Codex.
 3. `dangerous_deny`: a deterministic dangerous command is denied before shell entry with an explicit `Command blocked by PreToolUse hook:` result containing `git_non_read_only`. Native `rejected: blocked by policy`, filesystem permission errors, sandbox failures, or a nonzero shell exit do not satisfy this scenario.
 4. `cross_turn_resume`: a bounded publication transaction resumes in another turn without broadening its grant.
 5. `new_task_same_sha`: a new task loads the same installed artifacts.
@@ -124,6 +132,8 @@ After all feature scenarios pass, run the read-only collector. It does not insta
   --phase feature `
   --app-version '<app-version>' `
   --bundled-cli-version '<bundled-cli-version>' `
+  --safe-hook-response no_decision `
+  --host-approval-mode '<current-app-approval-mode>' `
   --scenario untrusted_to_trusted=passed `
   --scenario safe_allow=passed `
   --scenario dangerous_deny=passed `
@@ -133,6 +143,8 @@ After all feature scenarios pass, run the read-only collector. It does not insta
   --scenario same_sha_reinstall_state_preserved=passed `
   --scenario experiments_default_off=passed
 ```
+
+The optional `--safe-hook-response` and `--host-approval-mode` arguments must be supplied together and only with `safe_allow=passed`. They add a backward-compatible `safe_allow_attribution` object to the evidence; omitting both preserves the previous evidence shape. `no_decision` means the Hook returned `{}` and did not grant permission.
 
 The collector fails closed unless the checkout is clean, `origin` is the authorized fork, the App-bundled CLI marketplace/plugin inventory identifies that fork, App-bundled `hooks/list` exposes the exact expected target event counts with every target Hook enabled and trusted, HEAD exactly matches the requested SHA, one plugin instance is enabled, the Python 3.12 runtime uses the launcher's trusted root and versioned interpreter layout, and the installed cache hashes match the checkout. On Windows it locks the trusted runtime directory chain and interpreter against replacement, rejects reparse points through the held handles, and reads the executable `FileVersionInfo`; it never executes that runtime interpreter. Codex CLI 0.146 reports the Git source but not the pinned marketplace commit, so the evidence records that limitation and proves the commit through the authorized checkout plus the four required installed-artifact SHA-256 comparisons. Evidence also records path-free metadata for the active selector-derived data directory and any preserved legacy candidates (counts plus runtime/state-file presence only). It uses placeholders for private absolute paths, redacts sensitive fields, and rejects any remaining absolute path or credential-like value before writing the JSON file.
 
